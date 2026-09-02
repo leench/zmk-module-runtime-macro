@@ -1,0 +1,3 @@
+# Module build integration will be added when firmware implementation begins.
+# This metadata file intentionally does not register build sources yet.
+name: zmk-runtime-macro

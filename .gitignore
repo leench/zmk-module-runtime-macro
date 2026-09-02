@@ -1,0 +1,13 @@
+# Zephyr/ZMK build output
+build/
+
+# Python client
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Packaging/editor files
+*.egg-info/
+dist/
+.DS_Store
