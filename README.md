@@ -2,7 +2,7 @@
 
 独立的 ZMK external module 预研项目：运行时通过可选的模块自有 USB HID CLI 修改宏槽位，按键绑定触发槽位中的 ASCII 文本。
 
-> 当前阶段：仅完成调研文档和初步计划，尚未实现固件、Python CLI 或可编译的 Zephyr module。
+> 当前阶段：阶段 1（模块骨架与最小 behavior）已实现，尚未实现 Settings/NVS、ASCII 执行器、USB HID/Raw HID、协议或 Python CLI。
 
 ## 目标
 
@@ -20,6 +20,6 @@
 
 ## 当前状态
 
-当前仓库仍只有调研文档，尚未实现 USB HID 设备、协议或 behavior。设计面向支持 USB 和 Settings/NVS 的 ZMK split central 构建，具体依赖版本由使用方的构建清单决定。
+阶段 1 已完成：本仓库已是一个可编译的 Zephyr external module（module metadata、`CMakeLists.txt`、`Kconfig`），并提供最小的 `&runtime_macro <slot>` behavior——校验 slot 范围后仅记录日志占位，不执行任何文本。其余功能（Settings/NVS 持久化、ASCII 执行器、模块自有 USB HID/Raw HID 通道、协议和 Python CLI）尚未实现，属于后续阶段。设计面向支持 USB 和 Settings/NVS 的 ZMK split central 构建，具体依赖版本由使用方的构建清单决定。
 
 模块边界：宏槽位、Settings/NVS、ASCII 执行器和 behavior 属于核心功能，不能依赖 USB HID；模块自有 USB HID CLI 是可选的传输层。

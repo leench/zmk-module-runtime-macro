@@ -1,3 +1,10 @@
-# Module build integration will be added when firmware implementation begins.
-# This metadata file intentionally does not register build sources yet.
 name: zmk-runtime-macro
+build:
+  # Folder containing a "CMakeLists.txt" (. = module root)
+  cmake: .
+  # Kconfig filepath
+  kconfig: Kconfig
+  settings:
+    # Folder containing a "dts" folder (. = module root); needed so the
+    # runtime_macro binding and behaviors/runtime_macro.dtsi are discovered.
+    dts_root: .

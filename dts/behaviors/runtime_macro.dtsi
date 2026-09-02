@@ -1,0 +1,20 @@
+/*
+ * Copyright (c) 2026 The ZMK Contributors
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+#include <dt-bindings/zmk/behaviors.h>
+
+/ {
+    behaviors {
+#if ZMK_BEHAVIOR_OMIT(RM)
+        /omit-if-no-ref/
+#endif
+        runtime_macro: runtime_macro {
+            compatible = "zmk,behavior-runtime-macro";
+            #binding-cells = <1>;
+            display-name = "Runtime Macro";
+        };
+    };
+};

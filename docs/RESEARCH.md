@@ -316,7 +316,7 @@ ZMK Studio 客户端
 用户项目只需后续增加：
 
 ```text
-prj.conf：CONFIG_ZMK_RUNTIME_MACRO=y 及槽位参数
+prj.conf：CONFIG_ZMK_BEHAVIOR_RUNTIME_MACRO=y 及槽位参数
 prj.conf（需要主机 CLI 时）：CONFIG_ZMK_RUNTIME_MACRO_USB_HID=y
 .keymap：#include <behaviors/runtime_macro.dtsi> 和 &runtime_macro <slot>
 构建参数：将本模块加入 ZMK_EXTRA_MODULES
@@ -326,7 +326,7 @@ prj.conf（需要主机 CLI 时）：CONFIG_ZMK_RUNTIME_MACRO_USB_HID=y
 
 ## 11. 可弃用设计
 
-- 所有 Kconfig 使用 `ZMK_RUNTIME_MACRO_*` 命名空间。
+- behavior 开关使用 `ZMK_BEHAVIOR_*` 命名空间，其余 runtime macro 配置使用 `ZMK_RUNTIME_MACRO_*` 命名空间。
 - Settings 使用 `runtime_macro/` 命名空间。
 - CLI 协议包含 `version` 字段。
 - 不添加 ZMK 主仓库 patch，不 fork Studio RPC schema。

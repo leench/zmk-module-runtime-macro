@@ -1,0 +1,8 @@
+# Copyright (c) 2026 The ZMK Contributors
+# SPDX-License-Identifier: MIT
+
+description: Runtime Macro Behavior
+
+compatible: "zmk,behavior-runtime-macro"
+
+include: one_param.yaml

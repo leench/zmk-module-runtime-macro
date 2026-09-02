@@ -1,0 +1,31 @@
+# Copyright (c) 2026 The ZMK Contributors
+# SPDX-License-Identifier: MIT
+
+config ZMK_BEHAVIOR_RUNTIME_MACRO
+    bool "Runtime Macro behavior"
+    default y
+    depends on DT_HAS_ZMK_BEHAVIOR_RUNTIME_MACRO_ENABLED
+    help
+      Enable the runtime_macro behavior that triggers the US ASCII text stored
+      in one of the fixed macro slots (&runtime_macro <slot>).
+
+if ZMK_BEHAVIOR_RUNTIME_MACRO
+
+config ZMK_RUNTIME_MACRO_SLOT_COUNT
+    int "Number of macro slots"
+    default 8
+    range 1 16
+    help
+      Fixed number of macro slots addressed by &runtime_macro <slot> bindings.
+      Slot indexes outside of 0..(count - 1) are rejected.
+
+config ZMK_RUNTIME_MACRO_MAX_TEXT_LEN
+    int "Maximum text length per macro slot (characters)"
+    default 64
+    range 1 256
+    help
+      Maximum number of US ASCII characters a single macro slot can hold.
+      Upper limit consumed by later phases (Settings/NVS persistence and the
+      ASCII executor); no RAM slot buffer is allocated yet.
+
+endif # ZMK_BEHAVIOR_RUNTIME_MACRO
