@@ -1,0 +1,3 @@
+# Optional Python client dependency for the runtime-macro HID_1 channel.
+# Keep the lower bound broad; install the current compatible PyPI release.
+hidapi>=0.14

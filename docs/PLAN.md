@@ -1,6 +1,6 @@
 # Runtime Macro 初步计划
 
-阶段 1–4 已完成；阶段 5、6 仍按以下范围拆分实施。具体实现时再补充各阶段的详细验收项。
+阶段 1–5 已完成；阶段 6 仍待实际 dongle/键盘验证。
 
 已完成：
 
@@ -8,6 +8,7 @@
 - 阶段 2：固定 RAM 槽位、Settings handler、set/clear 持久化 API，以及 host 单元测试。
 - 阶段 3：US ASCII 映射、delayable work 逐字符 press/release 执行、单宏 busy 策略，以及 host/native_sim 验证。
 - 阶段 4：32-byte 传输无关协议、原子分块 SET、可选 legacy USB HID HID_1 transport，以及 central clean-build 验证。
+- 阶段 5：Python hidapi 验证客户端、固定帧协议校验、超时/重试处理和 fake-HID 单元测试。
 
 ## 阶段 1：模块骨架与 behavior
 
@@ -39,14 +40,16 @@
 - host transport/protocol 测试、nice_nano split central + Settings/NVS clean build，以及关闭 transport 的 clean build 已通过。
 - 使用 ZMK 官方 `studio-rpc-usb-uart` snippet 的 nice_nano split central + CDC ACM transport 共存 clean build 已通过；临时 keymap/conf/physical-layout 只放在 `/tmp`，未修改 ZMK 主仓库。
 
-## 阶段 5：Python 验证客户端
+## 阶段 5：Python 验证客户端（已完成）
 
-- 使用 `hidapi` 按 Usage Page/Usage 查找设备。
-- 实现 `list/get/set/clear` 命令。
-- 增加协议超时、响应校验和错误显示。
-- 用脚本完成手动测试流程。
+- 使用 PyPI `hidapi`（Python import `hid`）按 Usage Page/Usage 查找设备，严格选择 HID_1。
+- 实现 `list/get/set/clear` 命令，以及 `--path`、VID/PID、超时和重试选项。
+- 增加 32/33-byte HID report 兼容、协议响应校验、分页、原子 SET 重启和稳定错误显示。
+- `tests/python` 使用 fake HID module/device 覆盖固定帧、过滤、分页、控制字符、安全输出、陈旧 response、超时/重试和 close。
+- `python3 -m unittest discover -s tests/python -v`、`py_compile`、`git diff --check` 和现有 host GCC/Clang normal/sanitizer 测试已通过。
+- actual host/hidapi round trip、USB 重插、重启/NVS 和实体按键仍属于阶段 6，阶段 5 未宣称真机通过。
 
-## 阶段 6：实际键盘验证
+## 阶段 6：实际键盘验证（待执行）
 
 - 以支持 USB 的 ZMK split central 构建为第一目标。
 - 验证 ASCII 字母、数字、标点、Enter、Tab、Backspace。
