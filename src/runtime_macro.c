@@ -23,6 +23,14 @@ static size_t runtime_macro_slot_lengths[CONFIG_ZMK_RUNTIME_MACRO_SLOT_COUNT];
 static K_MUTEX_DEFINE(runtime_macro_slots_mutex);
 static K_MUTEX_DEFINE(runtime_macro_slot_update_mutex);
 
+#define RUNTIME_MACRO_DEFAULTS_SETTING_NAME "defaults_initialized"
+#define RUNTIME_MACRO_DEFAULTS_SETTING_PATH \
+    "runtime_macro/" RUNTIME_MACRO_DEFAULTS_SETTING_NAME
+#define RUNTIME_MACRO_DEFAULTS_MARKER 1U
+
+static bool runtime_macro_slot_has_persisted_setting[CONFIG_ZMK_RUNTIME_MACRO_SLOT_COUNT];
+static bool runtime_macro_defaults_initialized;
+
 static bool runtime_macro_slot_is_valid(uint8_t slot) {
     return slot < CONFIG_ZMK_RUNTIME_MACRO_SLOT_COUNT;
 }
@@ -47,6 +55,24 @@ static bool runtime_macro_text_is_valid(const char *text, size_t length) {
 
 static void runtime_macro_slot_setting_name(uint8_t slot, char *name, size_t name_size) {
     snprintf(name, name_size, "runtime_macro/slot/%u", slot);
+}
+
+static size_t runtime_macro_default_text(uint8_t slot, char *text, size_t text_size) {
+    if (text == NULL || text_size == 0U) {
+        return 0U;
+    }
+
+    int written = snprintf(text, text_size, "Runtime Macro %u", (unsigned int)slot + 1U);
+    if (written < 0) {
+        text[0] = '\0';
+        return 0U;
+    }
+
+    if ((size_t)written >= text_size) {
+        return text_size - 1U;
+    }
+
+    return (size_t)written;
 }
 
 static void runtime_macro_slot_replace(uint8_t slot, const char *text, size_t length) {
@@ -180,6 +206,24 @@ static int runtime_macro_settings_set(const char *name, size_t length, settings_
                                       void *cb_arg) {
     const char *next;
 
+    if (settings_name_steq(name, RUNTIME_MACRO_DEFAULTS_SETTING_NAME, &next)) {
+        if (next != NULL || length != sizeof(uint8_t) || read_cb == NULL) {
+            return -EINVAL;
+        }
+
+        uint8_t marker;
+        ssize_t read_length = read_cb(cb_arg, &marker, sizeof(marker));
+        if (read_length < 0) {
+            return (int)read_length;
+        }
+        if ((size_t)read_length != sizeof(marker) || marker != RUNTIME_MACRO_DEFAULTS_MARKER) {
+            return -EINVAL;
+        }
+
+        runtime_macro_defaults_initialized = true;
+        return 0;
+    }
+
     if (name == NULL || !settings_name_steq(name, "slot", &next)) {
         return -ENOENT;
     }
@@ -189,6 +233,10 @@ static int runtime_macro_settings_set(const char *name, size_t length, settings_
     if (err != 0) {
         return err;
     }
+
+    /* Remember the key even when its value is malformed, so defaults do not
+     * hide a persisted settings error. */
+    runtime_macro_slot_has_persisted_setting[slot] = true;
 
     if (length > CONFIG_ZMK_RUNTIME_MACRO_MAX_TEXT_LEN || read_cb == NULL) {
         return -EINVAL;
@@ -214,5 +262,51 @@ static int runtime_macro_settings_set(const char *name, size_t length, settings_
     return 0;
 }
 
+static int runtime_macro_settings_commit(void) {
+    if (runtime_macro_defaults_initialized) {
+        return 0;
+    }
+
+    bool defaults_persisted = true;
+    for (uint8_t slot = 0; slot < CONFIG_ZMK_RUNTIME_MACRO_SLOT_COUNT; slot++) {
+        if (runtime_macro_slot_has_persisted_setting[slot]) {
+            continue;
+        }
+
+        char default_text[CONFIG_ZMK_RUNTIME_MACRO_MAX_TEXT_LEN + 1];
+        size_t default_length =
+            runtime_macro_default_text(slot, default_text, sizeof(default_text));
+
+        k_mutex_lock(&runtime_macro_slots_mutex, K_FOREVER);
+        runtime_macro_slot_replace(slot, default_text, default_length);
+        k_mutex_unlock(&runtime_macro_slots_mutex);
+
+        char setting_name[sizeof("runtime_macro/slot/") + 3];
+        runtime_macro_slot_setting_name(slot, setting_name, sizeof(setting_name));
+
+        int err = settings_save_one(setting_name, default_text, default_length);
+        if (err != 0) {
+            defaults_persisted = false;
+            LOG_ERR("Failed to save default runtime macro slot %u (err %d)", slot, err);
+        } else {
+            runtime_macro_slot_has_persisted_setting[slot] = true;
+        }
+    }
+
+    if (!defaults_persisted) {
+        return 0;
+    }
+
+    const uint8_t marker = RUNTIME_MACRO_DEFAULTS_MARKER;
+    int err = settings_save_one(RUNTIME_MACRO_DEFAULTS_SETTING_PATH, &marker, sizeof(marker));
+    if (err != 0) {
+        LOG_ERR("Failed to save runtime macro defaults marker (err %d)", err);
+        return 0;
+    }
+
+    runtime_macro_defaults_initialized = true;
+    return 0;
+}
+
 SETTINGS_STATIC_HANDLER_DEFINE(runtime_macro, "runtime_macro", NULL, runtime_macro_settings_set,
-                               NULL, NULL);
+                               runtime_macro_settings_commit, NULL);

@@ -18,9 +18,22 @@ triggered. The module does not require changes to the ZMK main repository.
   returns `-EBUSY` and is not queued.
 - Optional module-owned USB HID configuration interface on HID_1.
 - Python `hidapi` client with `list`, `get`, `set`, and `clear` commands.
+- On first initialization, slots without persisted values receive defaults such as
+  `Runtime Macro 1` and `Runtime Macro 2`. Existing values are preserved, and a
+  cleared slot remains empty after reboot.
 
 Unicode, CJK text, Emoji, automatic keyboard-layout conversion, and concurrent
 macro queues are intentionally out of scope.
+
+## Security notice
+
+This module makes no security considerations for sensitive information. The USB
+HID configuration channel has no authentication, authorization, or encryption;
+any local process that can access the HID interface may read or modify slots.
+Slot contents may also be persisted to device Flash/NVS and emitted as keyboard
+input when triggered. Do not use this module for usernames, passwords, OTPs,
+tokens, keys, or other sensitive information. Use it only for non-sensitive text
+and disable `CONFIG_ZMK_RUNTIME_MACRO_USB_HID` on untrusted hosts.
 
 ## Add the module to a ZMK build
 

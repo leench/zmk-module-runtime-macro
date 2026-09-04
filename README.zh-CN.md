@@ -14,8 +14,13 @@
 - 单个 `k_work_delayable` 执行器；宏执行期间再次触发返回 `-EBUSY`，不会排队。
 - 可选的模块自有 USB HID 配置接口（第二个 HID interface，HID_1）。
 - Python `hidapi` 客户端，支持 `list`、`get`、`set` 和 `clear`。
+- 首次初始化时，为没有持久化值的 slot 设置默认内容 `Runtime Macro 1`、`Runtime Macro 2`……；已有值不会被覆盖，执行 `clear` 后也不会在重启时恢复默认值。
 
 不支持 Unicode、中文、Emoji、自动键盘布局转换或多个宏并发执行。
+
+## 安全注意事项
+
+本模块没有针对敏感信息做任何安全方面的考量：USB HID 配置通道没有认证、授权或加密，能够访问设备 HID interface 的本机程序可以读取和修改 slots；slot 内容还可能持久化到设备 Flash/NVS，并在触发时作为键盘输入输出。因此不建议使用本模块保存或发送用户名、密码、OTP、令牌、密钥或其他敏感信息。请仅用于非敏感文本，并在不可信主机上禁用 `CONFIG_ZMK_RUNTIME_MACRO_USB_HID`。
 
 ## 加入 ZMK 构建
 

@@ -24,7 +24,7 @@ static int save_result;
 static int delete_result;
 static unsigned int save_calls;
 static unsigned int delete_calls;
-static char saved_name[32];
+static char saved_name[64];
 static char saved_value[TEST_MAX_TEXT_LEN + 1];
 static size_t saved_length;
 static bool save_saw_updated_value;
@@ -49,6 +49,21 @@ static size_t concurrent_last_length;
 
 #include "../../src/runtime_macro_ascii.c"
 #include "../../src/runtime_macro.c"
+
+static void reset_runtime_macro_state(void) {
+    memset(runtime_macro_slots, 0, sizeof(runtime_macro_slots));
+    memset(runtime_macro_slot_lengths, 0, sizeof(runtime_macro_slot_lengths));
+    memset(runtime_macro_slot_has_persisted_setting, 0,
+           sizeof(runtime_macro_slot_has_persisted_setting));
+    runtime_macro_defaults_initialized = false;
+}
+
+static void reset_runtime_macro_ram(void) {
+    memset(runtime_macro_slots, 0, sizeof(runtime_macro_slots));
+    memset(runtime_macro_slot_lengths, 0, sizeof(runtime_macro_slot_lengths));
+    memset(runtime_macro_slot_has_persisted_setting, 0,
+           sizeof(runtime_macro_slot_has_persisted_setting));
+}
 
 static int failures;
 
@@ -259,9 +274,17 @@ static void test_defaults_and_basic_api(void) {
     const char *text;
     size_t length;
 
+    reset_runtime_macro_state();
     reset_backend();
-    expect_slot(0, "", 0);
-    expect_slot(1, "", 0);
+    EXPECT_EQ(0, runtime_macro_settings_commit());
+    expect_slot(0, "Runtime ", sizeof("Runtime ") - 1);
+    expect_slot(1, "Runtime ", sizeof("Runtime ") - 1);
+    char full_default[32];
+    EXPECT_EQ(sizeof("Runtime Macro 1") - 1,
+              runtime_macro_default_text(0, full_default, sizeof(full_default)));
+    EXPECT_TRUE(strcmp(full_default, "Runtime Macro 1") == 0);
+    EXPECT_EQ(3, save_calls);
+    EXPECT_TRUE(strcmp(saved_name, "runtime_macro/defaults_initialized") == 0);
 
     EXPECT_EQ(-EINVAL, zmk_runtime_macro_slot_get(0, NULL));
     EXPECT_EQ(-EINVAL, zmk_runtime_macro_slot_get_length(0, NULL));
@@ -269,11 +292,11 @@ static void test_defaults_and_basic_api(void) {
     EXPECT_EQ(-EINVAL, zmk_runtime_macro_slot_get_length(2, &length));
     EXPECT_EQ(-EINVAL, zmk_runtime_macro_slot_set(2, "x", 1));
     EXPECT_EQ(-EINVAL, zmk_runtime_macro_slot_clear(2));
-    EXPECT_EQ(0, save_calls);
+    EXPECT_EQ(3, save_calls);
     EXPECT_EQ(0, delete_calls);
 
     EXPECT_EQ(0, zmk_runtime_macro_slot_set(1, "Hi\n\t\b!", 6));
-    EXPECT_EQ(1, save_calls);
+    EXPECT_EQ(4, save_calls);
     EXPECT_TRUE(strcmp(saved_name, "runtime_macro/slot/1") == 0);
     EXPECT_EQ(6, saved_length);
     EXPECT_TRUE(strcmp(saved_value, "Hi\n\t\b!") == 0);
@@ -285,7 +308,38 @@ static void test_defaults_and_basic_api(void) {
     expect_slot(1, "", 0);
 
     EXPECT_EQ(0, zmk_runtime_macro_slot_set(1, NULL, 0));
+    EXPECT_EQ(5, save_calls);
+    expect_slot(1, "", 0);
+}
+
+static void test_defaults_preserve_existing_values_and_clear(void) {
+    struct reader_context existing_context = {
+        .data = "custom",
+        .copy_length = 6,
+        .result = 6,
+    };
+
+    reset_runtime_macro_state();
+    reset_backend();
+    EXPECT_EQ(0, runtime_macro_settings_set("slot/0", 6, read_value, &existing_context));
+    EXPECT_EQ(0, runtime_macro_settings_commit());
+    expect_slot(0, "custom", 6);
+    expect_slot(1, "Runtime ", sizeof("Runtime ") - 1);
     EXPECT_EQ(2, save_calls);
+    EXPECT_TRUE(strcmp(saved_name, "runtime_macro/defaults_initialized") == 0);
+
+    EXPECT_EQ(0, zmk_runtime_macro_slot_clear(0));
+    reset_runtime_macro_ram();
+    char marker_value = RUNTIME_MACRO_DEFAULTS_MARKER;
+    struct reader_context marker_context = {
+        .data = &marker_value,
+        .copy_length = 1,
+        .result = 1,
+    };
+    EXPECT_EQ(0, runtime_macro_settings_set(RUNTIME_MACRO_DEFAULTS_SETTING_NAME, 1,
+                                            read_value, &marker_context));
+    EXPECT_EQ(0, runtime_macro_settings_commit());
+    expect_slot(0, "", 0);
     expect_slot(1, "", 0);
 }
 
@@ -468,6 +522,7 @@ static void test_settings_read_errors_do_not_mutate(void) {
 
 int main(void) {
     test_defaults_and_basic_api();
+    test_defaults_preserve_existing_values_and_clear();
     test_length_and_character_validation();
     test_persistence_error_ordering();
     test_concurrent_persistence_order(CONCURRENT_UPDATE_SET);
