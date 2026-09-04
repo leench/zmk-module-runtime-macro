@@ -18,4 +18,11 @@ if (CONFIG_ZMK_BEHAVIOR_RUNTIME_MACRO
     src/runtime_macro_executor.c
     src/behaviors/behavior_runtime_macro.c
   )
+
+  if (CONFIG_ZMK_RUNTIME_MACRO_USB_HID)
+    zephyr_library_sources(
+      src/runtime_macro_protocol.c
+      src/runtime_macro_usb_hid.c
+    )
+  endif()
 endif() # CONFIG_ZMK_BEHAVIOR_RUNTIME_MACRO AND (unibody OR split central)

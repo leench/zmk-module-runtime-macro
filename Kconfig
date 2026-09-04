@@ -29,4 +29,28 @@ config ZMK_RUNTIME_MACRO_MAX_TEXT_LEN
       The module allocates one NUL-terminated RAM buffer of this size per slot
       and uses the same limit for Settings/NVS persistence and execution.
 
+config ZMK_RUNTIME_MACRO_USB_HID
+    bool "Runtime Macro USB HID transport"
+    default n
+    depends on ZMK_USB
+    depends on USB_DEVICE_STACK
+    depends on (!ZMK_SPLIT || ZMK_SPLIT_ROLE_CENTRAL)
+    help
+      Expose the runtime macro protocol through a second legacy USB HID
+      interface named HID_1. The transport is central-side only and keeps the
+      ZMK keyboard HID_0 interface unchanged. The module requires at least two
+      HID instances and a 32-byte interrupt endpoint; the build fails if an
+      explicit board configuration does not provide those values. Do not
+      enable CONFIG_ENABLE_HID_INT_OUT_EP because that option applies to every
+      HID instance, including ZMK's keyboard HID_0.
+
 endif # ZMK_BEHAVIOR_RUNTIME_MACRO
+
+# The legacy HID class owns these global settings for all HID instances. Add
+# safe defaults when the optional transport is enabled; the transport source
+# also rejects explicit incompatible values at build time.
+config USB_HID_DEVICE_COUNT
+    default 2 if ZMK_RUNTIME_MACRO_USB_HID
+
+config HID_INTERRUPT_EP_MPS
+    default 32 if ZMK_RUNTIME_MACRO_USB_HID

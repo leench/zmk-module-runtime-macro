@@ -1,12 +1,13 @@
 # Runtime Macro 初步计划
 
-阶段 1、2、3 已完成；后续阶段仍按以下范围拆分实施。具体实现时再补充各阶段的详细验收项。
+阶段 1–4 已完成；阶段 5、6 仍按以下范围拆分实施。具体实现时再补充各阶段的详细验收项。
 
 已完成：
 
 - 阶段 1：模块骨架、DTS behavior 和最小可编译版本。
 - 阶段 2：固定 RAM 槽位、Settings handler、set/clear 持久化 API，以及 host 单元测试。
 - 阶段 3：US ASCII 映射、delayable work 逐字符 press/release 执行、单宏 busy 策略，以及 host/native_sim 验证。
+- 阶段 4：32-byte 传输无关协议、原子分块 SET、可选 legacy USB HID HID_1 transport，以及 central clean-build 验证。
 
 ## 阶段 1：模块骨架与 behavior
 
@@ -29,14 +30,14 @@
 - 已处理空 slot、非法字符、超长文本和重复触发。
 - 第一版只允许一个 runtime macro 同时执行，执行期间重复触发返回 busy；不实现并发宏队列。
 
-## 阶段 4：模块自有 USB HID 通道与协议
+## 阶段 4：模块自有 USB HID 通道与协议（已完成）
 
-- 在本模块内实现 USB HID report descriptor、收发回调和发送节流。
-- 将 USB HID 通道作为可选功能；核心 behavior、slot、Settings/NVS 和执行器在关闭该功能时仍可独立编译。
-- 对需要额外 HID interface 的 board，由本模块提供所需的 shield/overlay 或明确的最小配置。
-- 固化 `list/get/set/clear` 的二进制帧格式。
-- 增加 request ID、版本号、状态码和长文本分包。
-- 验证与当前 Studio CDC/BLE RPC 并存。
+- 已固化 32-byte `list/get/set/clear` 二进制帧格式，包含 request ID、版本号、状态码和长文本分包。
+- 已实现原子 SET staging、重复分块恢复语义、固定 HID descriptor、HID_1 收发回调和单个在途 IN transfer 节流。
+- USB transport 默认关闭；核心 behavior、slot、Settings/NVS 和执行器在关闭该功能时独立编译。
+- transport 仅编译于 USB-enabled unibody 或 split central，保留 ZMK HID_0，不启用全局 interrupt OUT。
+- host transport/protocol 测试、nice_nano split central + Settings/NVS clean build，以及关闭 transport 的 clean build 已通过。
+- 使用 ZMK 官方 `studio-rpc-usb-uart` snippet 的 nice_nano split central + CDC ACM transport 共存 clean build 已通过；临时 keymap/conf/physical-layout 只放在 `/tmp`，未修改 ZMK 主仓库。
 
 ## 阶段 5：Python 验证客户端
 
