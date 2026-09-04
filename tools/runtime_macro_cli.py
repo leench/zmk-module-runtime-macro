@@ -196,20 +196,33 @@ def find_device(
     pid: int | None = None,
 ) -> dict[str, Any]:
     records = []
+    missing_usage_metadata = False
     for info in hid_module.enumerate():
-        if _field_int(info, "usage_page") != 0xFF60:
-            continue
-        if _field_int(info, "usage") != 0x61:
+        if path is not None and not same_path(info.get("path"), path):
             continue
         if vid is not None and _field_int(info, "vendor_id") != vid:
             continue
         if pid is not None and _field_int(info, "product_id") != pid:
             continue
-        if path is not None and not same_path(info.get("path"), path):
+
+        usage_page = _field_int(info, "usage_page")
+        usage = _field_int(info, "usage")
+        if usage_page == 0 and usage == 0:
+            missing_usage_metadata = True
+            # Some hidapi backends omit the parsed Usage fields. An explicit
+            # path is still unambiguous; without one, never guess a device.
+            if path is None:
+                continue
+        elif usage_page != 0xFF60 or usage != 0x61:
             continue
         records.append(info)
 
     if not records:
+        if path is None and missing_usage_metadata:
+            raise DeviceError(
+                "hidapi 未提供 HID Usage 元数据，请使用 --path 精确选择 HID_1；"
+                "也请确认固件已启用 CONFIG_ZMK_RUNTIME_MACRO_USB_HID 并检查 hidraw/udev 权限"
+            )
         raise DeviceError(
             "未找到 dongle HID_1（请确认固件已启用 CONFIG_ZMK_RUNTIME_MACRO_USB_HID，"
             "并检查 hidraw/udev 权限）"

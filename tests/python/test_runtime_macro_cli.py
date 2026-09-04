@@ -183,6 +183,22 @@ class ClientTests(unittest.TestCase):
         )
         self.assertEqual("b", selected["path"])
 
+    def test_explicit_path_accepts_missing_usage_metadata(self):
+        unknown_usage = record(
+            path=b"/dev/hidraw-runtime",
+            usage_page=0,
+            usage=0,
+        )
+        selected = cli.find_device(
+            FakeHid([unknown_usage], FakeDevice()),
+            path="/dev/hidraw-runtime",
+        )
+        self.assertEqual(b"/dev/hidraw-runtime", selected["path"])
+
+        with self.assertRaises(cli.DeviceError) as ctx:
+            cli.find_device(FakeHid([unknown_usage], FakeDevice()))
+        self.assertIn("--path", str(ctx.exception))
+
     def test_open_path_failure_closes_device(self):
         device = FakeDevice(open_error=OSError("permission denied"))
         module = FakeHid([record()], device)

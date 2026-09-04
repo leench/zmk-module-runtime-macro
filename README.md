@@ -1,45 +1,105 @@
 # ZMK Runtime Macro
 
-独立的 ZMK external module 预研项目：运行时通过可选的模块自有 USB HID CLI 修改宏槽位，按键绑定触发槽位中的 ASCII 文本。
+[中文说明](README.zh-CN.md)
 
-> 当前阶段：阶段 4（协议核心与可选 USB HID transport）已实现；Python CLI 属于阶段 5，真实硬件验证属于阶段 6。
+A Zephyr/ZMK external module that stores ASCII text in runtime macro slots and
+emits the text as keyboard events when a `&runtime_macro <slot>` behavior is
+triggered. The module does not require changes to the ZMK main repository.
 
-## 目标
+## Features
 
-- 提供 `&runtime_macro <slot>` custom behavior。
-- 将槽位内容保存到 Zephyr Settings/NVS，而不是写入 devicetree。
-- 由本模块自行实现可选的 USB HID 命令通道，提供 `list/get/set/clear`。
-- 第一版仅支持 US ASCII，暂不支持 Unicode。
-- 先使用 Python 脚本验证协议，后期再使用 Tauri 重写客户端。
-- 不修改 ZMK 主仓库、ZMK Studio 或 `zmk-studio-messages`。
+- Fixed-size runtime macro slots.
+- Zephyr Settings persistence, with NVS support on boards that provide a valid
+  storage partition.
+- Printable US ASCII (`0x20`–`0x7e`), LF, Tab, and Backspace.
+- Normal ZMK keycode event pipeline instead of direct keyboard HID report
+  construction.
+- One delayable-work executor; a second trigger while a macro is running
+  returns `-EBUSY` and is not queued.
+- Optional module-owned USB HID configuration interface on HID_1.
+- Python `hidapi` client with `list`, `get`, `set`, and `clear` commands.
 
-## 文档
+Unicode, CJK text, Emoji, automatic keyboard-layout conversion, and concurrent
+macro queues are intentionally out of scope.
 
-- [调研接口与架构](docs/RESEARCH.md)
-- [协议与 USB HID 映射](docs/PROTOCOL.md)
-- [初步分步计划](docs/PLAN.md)
+## Add the module to a ZMK build
 
-## 当前状态
+Pass this repository as a ZMK extra module. For example:
 
-阶段 1–5 已完成：本仓库是可编译的 Zephyr external module，并提供 `&runtime_macro <slot>` behavior、固定 RAM 槽位、公开的 `get/get_length/set/clear` API、`runtime_macro/slot/<n>` Settings handler、ASCII 执行器、传输无关的 32-byte 协议、可选的模块自有 USB HID transport，以及 Python 验证客户端。槽位文本限制为 printable US ASCII 和 `\n`、`\t`、`\b`，并在 set/load 时校验；set/clear 会先更新 RAM，再调用 Settings 持久化接口。按下 behavior 后由单个 delayable work 按字符发送 press/release 事件，并使用 busy 状态拒绝重复触发；事件通过 ZMK 正常 keycode pipeline 发送。
+```sh
+west build -b <board> -- \
+  -DZMK_CONFIG=/path/to/your/zmk-config \
+  -DZMK_EXTRA_MODULES=/path/to/zmk-module-runtime-macro
+```
 
-启用 behavior 需要 `CONFIG_SETTINGS=y`；使用 NVS 持久化时，目标 board 还需要有效的 `storage_partition`、`CONFIG_SETTINGS_NVS=y`、`CONFIG_NVS=y` 和相应的 Flash 依赖。
+When several external modules are required, pass all module paths using the
+CMake syntax expected by your build environment. No ZMK main-repository patch
+is required.
 
-启用 USB transport：
+## Keymap configuration
+
+Include the behavior DTS file explicitly in the keymap:
+
+```dts
+#include <behaviors/runtime_macro.dtsi>
+```
+
+Bind slots as follows:
+
+```dts
+&runtime_macro 0
+&runtime_macro 1
+```
+
+Slot numbering starts at `0` and is limited by
+`CONFIG_ZMK_RUNTIME_MACRO_SLOT_COUNT`. In a wireless split keyboard, the split
+central owns the behavior, slots, Settings/NVS data, and USB configuration
+interface; peripherals continue to report key positions normally.
+
+## Kconfig
+
+The core behavior requires Settings:
+
+```conf
+CONFIG_SETTINGS=y
+CONFIG_ZMK_RUNTIME_MACRO_SLOT_COUNT=8
+CONFIG_ZMK_RUNTIME_MACRO_MAX_TEXT_LEN=64
+```
+
+For NVS persistence, the board must provide a valid storage partition and the
+corresponding flash configuration, for example:
+
+```conf
+CONFIG_SETTINGS_NVS=y
+CONFIG_NVS=y
+CONFIG_FLASH_MAP=y
+```
+
+Enable the optional USB HID configuration interface with:
 
 ```conf
 CONFIG_ZMK_RUNTIME_MACRO_USB_HID=y
 ```
 
-该选项默认关闭，只在 `CONFIG_ZMK_USB=y`、legacy `CONFIG_USB_DEVICE_STACK=y` 且 unibody 或 split central 构建中可用。模块使用第二个 HID interface（HID_1），保留 ZMK 键盘 HID_0；Kconfig 会给出 `CONFIG_USB_HID_DEVICE_COUNT=2` 和 `CONFIG_HID_INTERRUPT_EP_MPS=32` 的安全默认。不要启用 `CONFIG_ENABLE_HID_INT_OUT_EP`，因为它是所有 HID interface 共用的设置并会改变 HID_0。USB transport 的完整映射和 control `SET_REPORT` / interrupt `IN` 方向见 [docs/PROTOCOL.md](docs/PROTOCOL.md)。
+This option is available for USB-enabled unibody or split-central builds. It
+uses HID_1 and leaves ZMK's keyboard HID_0 unchanged. The module defaults to
+two HID instances and a 32-byte interrupt-IN endpoint. Do not enable
+`CONFIG_ENABLE_HID_INT_OUT_EP`; that global option also changes HID_0.
 
-对于无线 split，宏槽位和 USB transport 运行在 dongle 的 split central：电脑只通过 USB 连接 dongle，slots 保存到 dongle 的 NVS；左右 peripheral 不分别保存或提供该 USB 接口。阶段 4 已完成容器 clean build、host 测试，以及使用 ZMK 官方 `studio-rpc-usb-uart` snippet 的 CDC ACM transport 共存 clean build；Python 客户端的 fake-HID 测试已完成，但尚未进行真实硬件或 actual host/hidapi round trip，后者属于阶段 6。
+Execution timing uses ZMK's global macro settings:
 
-模块边界：宏槽位、Settings/NVS、ASCII 执行器和 behavior 属于核心功能，不能依赖 USB HID；模块自有 USB HID transport 是可选层。
+```conf
+CONFIG_ZMK_MACRO_DEFAULT_TAP_MS=30
+CONFIG_ZMK_MACRO_DEFAULT_WAIT_MS=15
+```
 
-## 阶段 5 Python 客户端
+`TAP_MS` is the time each character remains pressed, and `WAIT_MS` is the delay
+from release to the next character. These are build-time global settings, not
+per-slot or Python-client settings.
 
-建议在电脑上用虚拟环境安装客户端依赖：
+## Python client
+
+The reference client requires Python 3 and the PyPI `hidapi` package:
 
 ```sh
 python3 -m venv .venv
@@ -47,28 +107,83 @@ python3 -m venv .venv
 python3 -m pip install -r tools/requirements.txt
 ```
 
-客户端按 vendor Usage Page `0xff60` / Usage `0x61` 查找模块的 HID_1，不会误连键盘 HID_0：
+The complete command reference, device selection rules, Python module API,
+wire behavior, error handling, and Linux permissions are documented in
+[`docs/CLI.md`](docs/CLI.md). The fixed 32-byte protocol and USB HID mapping
+are documented in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
+
+Quick examples:
 
 ```sh
 python3 tools/runtime_macro_cli.py list
 python3 tools/runtime_macro_cli.py get 0
 python3 tools/runtime_macro_cli.py get 0 --raw > slot-0.txt
+python3 tools/runtime_macro_cli.py set 0 --text 'Hello'
 printf 'Hello\n' | python3 tools/runtime_macro_cli.py set 0 --stdin
 python3 tools/runtime_macro_cli.py set 0 --file slot-0.txt
-cat slot-0.txt | python3 tools/runtime_macro_cli.py set 0 --stdin
 python3 tools/runtime_macro_cli.py clear 0
 ```
 
-`--text` 按字面读取 ASCII，不解释反斜杠转义；需要换行、Tab 或 Backspace 时，请使用 `--file`、`--stdin`（如上面的 `printf`）或 Bash 的 `$'Hello\n'` 语法。全局设备选项可放在子命令前：`--path PATH` 精确选择设备，或用 `--vid 0x1234 --pid 0x5678` 缩小匹配范围；`--timeout-ms` 和 `--retries` 控制超时与可恢复传输重试。多个 HID_1 匹配时必须使用 `--path`。`get` 默认转义换行、Tab、Backspace；`--raw` 才输出原始槽位 bytes。
+Global options come before the subcommand. When more than one compatible
+interface is connected, select one explicitly:
 
-Linux 若提示未找到或无法打开设备，先检查 `hidraw` 节点权限和 `udevadm info -q property -n /dev/hidrawN`。不要长期使用全局 `chmod 666`；可按实际枚举到的 VID/PID 创建规则，例如：
-
-```udev
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1234", ATTRS{idProduct}=="5678", MODE="0660", GROUP="plugdev"
+```sh
+python3 tools/runtime_macro_cli.py --path "$HID_PATH" list
 ```
 
-VID/PID 可能被用户固件覆盖，示例值不是固定产品 ID。重新加载 udev 规则并重新插拔 dongle 后再测试。
+`--text` is literal and does not interpret backslash escapes. Use stdin, a
+file, or shell ANSI-C quoting when LF, Tab, or Backspace is needed. Some Linux
+`hidapi` backends omit parsed Usage Page/Usage metadata; in that case the
+client requires an explicit `--path` rather than guessing a device. Do not
+commit real paths, serial numbers, or host-specific device information.
 
-## 阶段 6 手工流程（尚未执行）
+## Protocol and C interfaces
 
-连接并刷写启用本模块的 dongle 后，依次运行 `list` → `set` → `get`，按实体 `&runtime_macro <slot>` 按键确认输出，再测试 USB 重插、dongle 重启后的 NVS 恢复，最后运行 `clear` 并用 `get` 确认为空。真实设备、权限和 NVS 测试均不属于阶段 5。
+- Wire protocol: [`docs/PROTOCOL.md`](docs/PROTOCOL.md)
+- Python CLI and Python module API: [`docs/CLI.md`](docs/CLI.md)
+- Runtime macro C API: [`include/zmk/runtime_macro.h`](include/zmk/runtime_macro.h)
+- Protocol C API: [`include/zmk/runtime_macro_protocol.h`](include/zmk/runtime_macro_protocol.h)
+
+The protocol provides `LIST`, `GET`, `SET`, and `CLEAR`. Long text is sent in
+22-byte chunks; a slot is not changed until a complete `SET` transaction has
+been received.
+
+## Tests
+
+```sh
+./tests/host/run.sh
+python3 -m unittest discover -s tests/python -v
+python3 -m py_compile tools/runtime_macro_cli.py
+```
+
+Host tests cover slot and Settings logic, ASCII mapping, asynchronous
+execution, the protocol core, and USB transport stubs. Python tests use a fake
+HID device. Target builds require the target ZMK workspace and its configured
+containerized Zephyr environment.
+
+## Status
+
+Phases 1–5 are implemented and committed. Phase 6 has confirmed HID protocol
+round trips and slot read/write on one compatible central device. Physical key
+output, USB reconnect behavior, reboot/NVS retention, and portability across
+other boards and host backends still require validation on the target hardware.
+This status does not claim that every board or host platform has been tested.
+
+## Privacy
+
+This is a public repository. Documentation and tests must not contain:
+
+- local, workspace, or container absolute paths;
+- USB serial numbers, real hidraw paths, or personal device identifiers;
+- private repository URLs, access tokens, user data, or unpublished
+  configuration.
+
+Use placeholders for paths, VID/PID values, device names, and serial numbers in
+examples. Keep real hardware details in local test records only.
+
+## Roadmap
+
+Historical phases and remaining work are listed in [`docs/PLAN.md`](docs/PLAN.md).
+A future graphical client may reuse the v1 wire protocol. Unicode, new ZMK
+Studio RPC messages, and ZMK main-repository changes remain outside the current
+scope.

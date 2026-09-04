@@ -1,8 +1,11 @@
 # Runtime Macro Protocol v1
 
-本文档定义 runtime macro 的 32-byte 传输无关协议，以及阶段 4B 的可选 USB HID
-映射。协议核心接收完整 frame，并由一个串行 work consumer 调用；核心本身不创建
-线程、队列或 USB 设备。
+This document defines the 32-byte transport-independent runtime macro protocol and
+its optional USB HID mapping. The protocol core receives complete frames and is
+called by one serialized work consumer; it does not create a thread, queue, or USB
+device.
+
+See [`CLI.md`](CLI.md) for the reference Python client's command-line and module APIs.
 
 ## Frame
 
