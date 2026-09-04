@@ -99,16 +99,19 @@ uses HID_1 and leaves ZMK's keyboard HID_0 unchanged. The module defaults to
 two HID instances and a 32-byte interrupt-IN endpoint. Do not enable
 `CONFIG_ENABLE_HID_INT_OUT_EP`; that global option also changes HID_0.
 
-Execution timing uses ZMK's global macro settings:
+Execution timing uses runtime-macro-specific settings. They follow ZMK's
+corresponding global macro settings by default:
 
 ```conf
-CONFIG_ZMK_MACRO_DEFAULT_TAP_MS=30
-CONFIG_ZMK_MACRO_DEFAULT_WAIT_MS=15
+CONFIG_ZMK_RUNTIME_MACRO_TAP_MS=30
+CONFIG_ZMK_RUNTIME_MACRO_WAIT_MS=15
 ```
 
 `TAP_MS` is the time each character remains pressed, and `WAIT_MS` is the delay
-from release to the next character. These are build-time global settings, not
-per-slot or Python-client settings.
+from release to the next character. These are build-time settings, not
+per-slot or Python-client settings. Set both to `0` when matching a keymap whose
+static macros explicitly use `tap-ms = <0>` and `wait-ms = <0>`. The global
+`CONFIG_ZMK_MACRO_DEFAULT_*` values are not changed by these module settings.
 
 ## Python client
 

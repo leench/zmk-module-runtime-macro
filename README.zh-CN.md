@@ -77,14 +77,14 @@ CONFIG_ZMK_RUNTIME_MACRO_USB_HID=y
 
 该选项只适用于启用了 USB 的 unibody 或 split central 构建。它使用 HID_1，保留 ZMK 键盘的 HID_0；模块默认使用两个 HID instance 和 32-byte interrupt-IN endpoint。不要启用 `CONFIG_ENABLE_HID_INT_OUT_EP`，因为它会同时影响 HID_0。
 
-执行速度使用 ZMK 的全局宏配置：
+执行速度使用 runtime macro 独立配置，默认跟随 ZMK 对应的全局宏配置：
 
 ```conf
-CONFIG_ZMK_MACRO_DEFAULT_TAP_MS=30
-CONFIG_ZMK_MACRO_DEFAULT_WAIT_MS=15
+CONFIG_ZMK_RUNTIME_MACRO_TAP_MS=30
+CONFIG_ZMK_RUNTIME_MACRO_WAIT_MS=15
 ```
 
-`TAP_MS` 是每个字符保持按下的时间，`WAIT_MS` 是释放后到下一个字符按下的等待时间。它们是编译时的全局配置，不是每个 slot 独立配置，也不能由 Python 客户端修改。
+`TAP_MS` 是每个字符保持按下的时间，`WAIT_MS` 是释放后到下一个字符按下的等待时间。它们是编译时配置，不是每个 slot 独立配置，也不能由 Python 客户端修改。如果要匹配静态宏中明确设置的 `tap-ms = <0>` 和 `wait-ms = <0>`，将这两个配置都设为 `0`。这不会修改全局的 `CONFIG_ZMK_MACRO_DEFAULT_*` 配置。
 
 ## Python 客户端
 

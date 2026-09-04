@@ -12,6 +12,23 @@ config ZMK_BEHAVIOR_RUNTIME_MACRO
 
 if ZMK_BEHAVIOR_RUNTIME_MACRO
 
+config ZMK_RUNTIME_MACRO_TAP_MS
+    int "Runtime macro tap time (milliseconds)"
+    default ZMK_MACRO_DEFAULT_TAP_MS
+    range 0 1000
+    help
+      Time each character remains pressed while a runtime macro is emitted.
+      The default follows ZMK's global macro tap time.
+
+config ZMK_RUNTIME_MACRO_WAIT_MS
+    int "Runtime macro wait time (milliseconds)"
+    default ZMK_MACRO_DEFAULT_WAIT_MS
+    range 0 1000
+    help
+      Delay between releasing one character and pressing the next character
+      while a runtime macro is emitted. The default follows ZMK's global macro
+      wait time.
+
 config ZMK_RUNTIME_MACRO_SLOT_COUNT
     int "Number of macro slots"
     default 8

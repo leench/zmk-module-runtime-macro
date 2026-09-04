@@ -88,7 +88,7 @@ static void runtime_macro_executor_work_handler(struct k_work *work) {
         (void)runtime_macro_executor_raise(true);
         runtime_macro_executor.phase = RUNTIME_MACRO_EXECUTOR_RELEASE;
 
-        err = runtime_macro_executor_schedule(K_MSEC(CONFIG_ZMK_MACRO_DEFAULT_TAP_MS));
+        err = runtime_macro_executor_schedule(K_MSEC(CONFIG_ZMK_RUNTIME_MACRO_TAP_MS));
         if (err < 0) {
             /* A successful press may already have reached a listener. */
             (void)runtime_macro_executor_raise(false);
@@ -107,7 +107,7 @@ static void runtime_macro_executor_work_handler(struct k_work *work) {
         }
 
         runtime_macro_executor.phase = RUNTIME_MACRO_EXECUTOR_PRESS;
-        int err = runtime_macro_executor_schedule(K_MSEC(CONFIG_ZMK_MACRO_DEFAULT_WAIT_MS));
+        int err = runtime_macro_executor_schedule(K_MSEC(CONFIG_ZMK_RUNTIME_MACRO_WAIT_MS));
         if (err < 0) {
             /* The current key was released, so it is safe to finish here. */
             runtime_macro_executor_finish();
