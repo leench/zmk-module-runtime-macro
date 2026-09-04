@@ -16,7 +16,7 @@ triggered. The module does not require changes to the ZMK main repository.
   construction.
 - One delayable-work executor; a second trigger while a macro is running
   returns `-EBUSY` and is not queued.
-- Optional module-owned USB HID configuration interface on HID_1.
+- Optional module-owned USB HID configuration interface on HID_1 by default; the device can be changed when another module already owns it.
 - Python `hidapi` client with `list`, `get`, `set`, and `clear` commands.
 - On first initialization, slots without persisted values receive defaults such as
   `Runtime Macro 1` and `Runtime Macro 2`. Existing values are preserved, and a
@@ -94,10 +94,20 @@ Enable the optional USB HID configuration interface with:
 CONFIG_ZMK_RUNTIME_MACRO_USB_HID=y
 ```
 
-This option is available for USB-enabled unibody or split-central builds. It
-uses HID_1 and leaves ZMK's keyboard HID_0 unchanged. The module defaults to
-two HID instances and a 32-byte interrupt-IN endpoint. Do not enable
-`CONFIG_ENABLE_HID_INT_OUT_EP`; that global option also changes HID_0.
+This option is available for USB-enabled unibody or split-central builds. By
+default it uses HID_1 and leaves ZMK's keyboard HID_0 unchanged. Set
+`CONFIG_ZMK_RUNTIME_MACRO_USB_HID_DEVICE` to another unused HID device when
+another module already owns HID_1; that configuration must also increase
+`CONFIG_USB_HID_DEVICE_COUNT` as needed. The transport requires a 32-byte
+interrupt-IN endpoint. Do not enable `CONFIG_ENABLE_HID_INT_OUT_EP`; that
+global option also changes HID_0.
+
+For example, when a display Raw HID transport already owns HID_1:
+
+```conf
+CONFIG_USB_HID_DEVICE_COUNT=3
+CONFIG_ZMK_RUNTIME_MACRO_USB_HID_DEVICE="HID_2"
+```
 
 Execution timing uses runtime-macro-specific settings. They follow ZMK's
 corresponding global macro settings by default:

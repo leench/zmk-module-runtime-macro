@@ -39,7 +39,7 @@ data.
 
 - Fixed 32-byte v1 `LIST`, `GET`, `SET`, and `CLEAR` protocol.
 - 22-byte payload chunks and atomic SET staging.
-- Optional vendor HID_1 transport using Usage Page `0xff60` and Usage `0x61`.
+- Optional vendor USB HID transport (HID_1 by default) using Usage Page `0xff60` and Usage `0x61`.
 - HID_0 remains the normal ZMK keyboard interface.
 - Interrupt OUT remains disabled globally so HID_0 is not changed.
 - Central-only USB build, NVS build, transport-off build, and Studio CDC ACM
@@ -57,7 +57,7 @@ data.
 
 ### Completed checks
 
-- Enumerate a real compatible HID_1 interface.
+- Enumerate a real compatible runtime macro HID interface.
 - Receive a valid 32-byte `LIST` response.
 - Write and read back multiple slots through the protocol.
 - Confirm that a second connected interface is not selected implicitly.

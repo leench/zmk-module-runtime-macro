@@ -25,6 +25,7 @@
 #define CONFIG_ZMK_MACRO_DEFAULT_WAIT_MS 20
 #define CONFIG_USB_HID_DEVICE_COUNT 2
 #define CONFIG_HID_INTERRUPT_EP_MPS 32
+#define CONFIG_ZMK_RUNTIME_MACRO_USB_HID_DEVICE "HID_1"
 #define CONFIG_ZMK_USB_HID_INIT_PRIORITY 95
 
 static int save_result;
@@ -90,7 +91,7 @@ int settings_delete(const char *name) {
 }
 
 const struct device *device_get_binding(const char *name) {
-  EXPECT_TRUE(strcmp(name, "HID_1") == 0);
+  EXPECT_TRUE(strcmp(name, CONFIG_ZMK_RUNTIME_MACRO_USB_HID_DEVICE) == 0);
   return bound_device;
 }
 

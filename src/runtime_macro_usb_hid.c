@@ -179,14 +179,17 @@ static const struct hid_ops runtime_macro_usb_hid_ops = {
 };
 
 static int runtime_macro_usb_hid_init(void) {
-  const struct device *hid_dev = device_get_binding("HID_1");
+  const struct device *hid_dev =
+      device_get_binding(CONFIG_ZMK_RUNTIME_MACRO_USB_HID_DEVICE);
   if (hid_dev == NULL) {
-    LOG_ERR("Unable to locate runtime macro USB HID device HID_1");
+    LOG_ERR("Unable to locate runtime macro USB HID device %s",
+            CONFIG_ZMK_RUNTIME_MACRO_USB_HID_DEVICE);
     return -ENODEV;
   }
 
   if (!device_is_ready(hid_dev)) {
-    LOG_ERR("Runtime macro USB HID device HID_1 is not ready");
+    LOG_ERR("Runtime macro USB HID device %s is not ready",
+            CONFIG_ZMK_RUNTIME_MACRO_USB_HID_DEVICE);
     return -ENODEV;
   }
 

@@ -1,4 +1,4 @@
-"""Command-line client for the ZMK runtime-macro HID_1 protocol."""
+"""Command-line client for the ZMK runtime-macro USB HID protocol."""
 
 from __future__ import annotations
 
@@ -220,16 +220,16 @@ def find_device(
     if not records:
         if path is None and missing_usage_metadata:
             raise DeviceError(
-                "hidapi 未提供 HID Usage 元数据，请使用 --path 精确选择 HID_1；"
+                "hidapi 未提供 HID Usage 元数据，请使用 --path 精确选择 runtime macro HID；"
                 "也请确认固件已启用 CONFIG_ZMK_RUNTIME_MACRO_USB_HID 并检查 hidraw/udev 权限"
             )
         raise DeviceError(
-            "未找到 dongle HID_1（请确认固件已启用 CONFIG_ZMK_RUNTIME_MACRO_USB_HID，"
+            "未找到 dongle runtime macro HID（请确认固件已启用 CONFIG_ZMK_RUNTIME_MACRO_USB_HID，"
             "并检查 hidraw/udev 权限）"
         )
     if len(records) > 1 and path is None:
         choices = "\n".join(f"  {_device_summary(info)}" for info in records)
-        raise DeviceError("找到多个 dongle HID_1，请使用 --path 精确选择：\n" + choices)
+        raise DeviceError("找到多个匹配的 dongle HID，请使用 --path 精确选择 runtime macro HID：\n" + choices)
     return records[0]
 
 
@@ -589,7 +589,7 @@ def open_transport(
             device.close()
         except Exception:  # noqa: BLE001,S110 - close must not mask open failure
             pass
-        raise DeviceError(f"无法打开 dongle HID_1（{_path_text(info.get('path'))}）：{exc}") from exc
+        raise DeviceError(f"无法打开 dongle runtime macro HID（{_path_text(info.get('path'))}）：{exc}") from exc
     return HidTransport(device, clock=clock)
 
 

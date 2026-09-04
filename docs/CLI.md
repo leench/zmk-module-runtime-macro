@@ -1,7 +1,7 @@
 # Python CLI 和接口
 
 `tools/runtime_macro_cli.py` 是 runtime macro USB HID 配置接口的参考客户端。它通过
-`hidapi` 连接固件的 HID_1，不依赖 ZMK Studio，也不会连接 ZMK 的键盘 HID_0。
+`hidapi` 连接固件的 runtime macro USB HID（默认是 HID_1），不依赖 ZMK Studio，也不会连接 ZMK 的键盘 HID_0。
 
 该接口没有加密或认证机制。任何能够访问设备 HID interface 的本机进程都可能读取或修改
 slots；不要在不可信的 USB 主机上启用该 transport。
@@ -106,11 +106,13 @@ python3 tools/runtime_macro_cli.py clear 0
 
 ## 设备发现和 Linux 权限
 
-正常情况下，客户端按 vendor Usage Page `0xff60`、Usage `0x61` 找到 HID_1。它会拒绝
-多个匹配设备，并要求使用 `--path`，避免误操作其他设备。
+正常情况下，客户端按 vendor Usage Page `0xff60`、Usage `0x61` 找到 runtime macro HID。它会拒绝
+多个匹配设备，并要求使用 `--path`，避免误操作其他设备。如果固件通过
+`CONFIG_ZMK_RUNTIME_MACRO_USB_HID_DEVICE` 将 runtime macro transport 配置为 HID_2，
+而另一个模块也暴露了相同 Usage，则必须使用 runtime macro HID 的精确 `--path`。
 
 部分 Linux `hidapi` 后端无法返回解析后的 Usage Page/Usage。这种情况下，客户端不会自动
-猜测设备；请从系统枚举结果中获取 HID_1 的 path，并显式传入：
+猜测设备；请从系统枚举结果中获取 runtime macro HID 的 path，并显式传入：
 
 ```sh
 python3 tools/runtime_macro_cli.py --path "$HID_PATH" list

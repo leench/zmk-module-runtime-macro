@@ -53,13 +53,22 @@ config ZMK_RUNTIME_MACRO_USB_HID
     depends on USB_DEVICE_STACK
     depends on (!ZMK_SPLIT || ZMK_SPLIT_ROLE_CENTRAL)
     help
-      Expose the runtime macro protocol through a second legacy USB HID
-      interface named HID_1. The transport is central-side only and keeps the
-      ZMK keyboard HID_0 interface unchanged. The module requires at least two
-      HID instances and a 32-byte interrupt endpoint; the build fails if an
-      explicit board configuration does not provide those values. Do not
-      enable CONFIG_ENABLE_HID_INT_OUT_EP because that option applies to every
-      HID instance, including ZMK's keyboard HID_0.
+      Expose the runtime macro protocol through a dedicated legacy USB HID
+      interface. The transport is central-side only and keeps the ZMK keyboard
+      HID_0 interface unchanged. The module requires a 32-byte interrupt
+      endpoint; the build fails if an explicit board configuration does not
+      provide that value. Do not enable CONFIG_ENABLE_HID_INT_OUT_EP because
+      that option applies to every HID instance, including ZMK's keyboard
+      HID_0.
+
+config ZMK_RUNTIME_MACRO_USB_HID_DEVICE
+    string "Runtime Macro USB HID device"
+    default "HID_1"
+    help
+      Zephyr USB HID device name used by the runtime macro transport. HID_1
+      is the default. If another module already owns HID_1, increase
+      USB_HID_DEVICE_COUNT and assign this transport to a different unused
+      instance, such as HID_2.
 
 endif # ZMK_BEHAVIOR_RUNTIME_MACRO
 

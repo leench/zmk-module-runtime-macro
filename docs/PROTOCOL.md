@@ -174,13 +174,17 @@ The protocol core does not create a thread, queue, USB device, or singleton stat
 
 ## USB HID transport (optional)
 
-When `CONFIG_ZMK_RUNTIME_MACRO_USB_HID=y`, the module registers a second legacy
-USB HID instance named `HID_1`. ZMK's normal keyboard remains `HID_0`; the module
-never changes its descriptor or callbacks. The transport is compiled only for a
-USB-enabled unibody or split central build, and requires
+When `CONFIG_ZMK_RUNTIME_MACRO_USB_HID=y`, the module registers a dedicated
+legacy USB HID instance. Its device name defaults to `HID_1` and can be changed
+with `CONFIG_ZMK_RUNTIME_MACRO_USB_HID_DEVICE` when another module already owns
+that instance. ZMK's normal keyboard remains `HID_0`; the module never changes
+its descriptor or callbacks. The transport is compiled only for a USB-enabled
+unibody or split central build, and requires
 `CONFIG_USB_DEVICE_STACK=y`. The safe module defaults are
-`CONFIG_USB_HID_DEVICE_COUNT=2` and `CONFIG_HID_INTERRUPT_EP_MPS=32` (an explicit
-smaller configuration is rejected at compile time). Do not enable
+`CONFIG_HID_INTERRUPT_EP_MPS=32` (an explicit smaller configuration is rejected
+at compile time). `CONFIG_USB_HID_DEVICE_COUNT` must include the configured
+runtime macro HID device; for example, using `HID_2` requires at least three
+HID instances. Do not enable
 `CONFIG_ENABLE_HID_INT_OUT_EP`: that global option would add an OUT endpoint to
 `HID_0` as well.
 
@@ -192,11 +196,12 @@ count is 32 with 8-bit fields; there is no padding before, after, or between
 fields.
 
 Because interrupt OUT is deliberately disabled, host requests are delivered by
-HID class control `SET_REPORT` to `HID_1`'s `set_report` callback. The callback
-accepts only an Output report with report ID 0 and length 32, copies it to a
-fixed queue without parsing or blocking, and schedules the transport work. The
-work consumer processes one request at a time and sends every complete 32-byte
-response through `HID_1`'s interrupt IN endpoint using `hid_int_ep_write()`.
+HID class control `SET_REPORT` to the configured runtime macro HID device's
+`set_report` callback. The callback accepts only an Output report with report ID
+0 and length 32, copies it to a fixed queue without parsing or blocking, and
+schedules the transport work. The work consumer processes one request at a time
+and sends every complete 32-byte response through that device's interrupt IN
+endpoint using `hid_int_ep_write()`.
 Only one IN transfer is in flight; the completion callback releases the send
 permit and schedules the next queued request. The 32-byte response buffer is
 static storage and remains unchanged until `int_in_ready` confirms completion.

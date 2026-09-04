@@ -12,7 +12,7 @@
 - 支持完整 printable US ASCII（`0x20–0x7e`）以及换行（LF）、Tab 和 Backspace。
 - 通过 ZMK 正常的 keycode event pipeline 发送按键，不直接构造键盘 HID report。
 - 单个 `k_work_delayable` 执行器；宏执行期间再次触发返回 `-EBUSY`，不会排队。
-- 可选的模块自有 USB HID 配置接口（第二个 HID interface，HID_1）。
+- 可选的模块自有 USB HID 配置接口（默认使用 HID_1；如果已有模块占用，也可以改用其他 HID instance）。
 - Python `hidapi` 客户端，支持 `list`、`get`、`set` 和 `clear`。
 - 首次初始化时，为没有持久化值的 slot 设置默认内容 `Runtime Macro 1`、`Runtime Macro 2`……；已有值不会被覆盖，执行 `clear` 后也不会在重启时恢复默认值。
 
@@ -75,7 +75,14 @@ CONFIG_FLASH_MAP=y
 CONFIG_ZMK_RUNTIME_MACRO_USB_HID=y
 ```
 
-该选项只适用于启用了 USB 的 unibody 或 split central 构建。它使用 HID_1，保留 ZMK 键盘的 HID_0；模块默认使用两个 HID instance 和 32-byte interrupt-IN endpoint。不要启用 `CONFIG_ENABLE_HID_INT_OUT_EP`，因为它会同时影响 HID_0。
+该选项只适用于启用了 USB 的 unibody 或 split central 构建。默认使用 HID_1，保留 ZMK 键盘的 HID_0。如果已有其他模块占用 HID_1，可以通过 `CONFIG_ZMK_RUNTIME_MACRO_USB_HID_DEVICE` 指定未占用的 HID instance，并同步增加 `CONFIG_USB_HID_DEVICE_COUNT`。传输需要 32-byte interrupt-IN endpoint。不要启用 `CONFIG_ENABLE_HID_INT_OUT_EP`，因为它会同时影响 HID_0。
+
+例如显示屏的 Raw HID 已占用 HID_1 时：
+
+```conf
+CONFIG_USB_HID_DEVICE_COUNT=3
+CONFIG_ZMK_RUNTIME_MACRO_USB_HID_DEVICE="HID_2"
+```
 
 执行速度使用 runtime macro 独立配置，默认跟随 ZMK 对应的全局宏配置：
 
