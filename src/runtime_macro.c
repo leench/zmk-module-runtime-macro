@@ -206,6 +206,10 @@ static int runtime_macro_settings_set(const char *name, size_t length, settings_
                                       void *cb_arg) {
     const char *next;
 
+    if (name == NULL) {
+        return -ENOENT;
+    }
+
     if (settings_name_steq(name, RUNTIME_MACRO_DEFAULTS_SETTING_NAME, &next)) {
         if (next != NULL || length != sizeof(uint8_t) || read_cb == NULL) {
             return -EINVAL;
@@ -224,7 +228,7 @@ static int runtime_macro_settings_set(const char *name, size_t length, settings_
         return 0;
     }
 
-    if (name == NULL || !settings_name_steq(name, "slot", &next)) {
+    if (!settings_name_steq(name, "slot", &next)) {
         return -ENOENT;
     }
 
