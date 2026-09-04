@@ -1,6 +1,12 @@
 # Runtime Macro 初步计划
 
-当前只保留高层步骤；具体实现时再拆分任务和验收项。
+阶段 1、2、3 已完成；后续阶段仍按以下范围拆分实施。具体实现时再补充各阶段的详细验收项。
+
+已完成：
+
+- 阶段 1：模块骨架、DTS behavior 和最小可编译版本。
+- 阶段 2：固定 RAM 槽位、Settings handler、set/clear 持久化 API，以及 host 单元测试。
+- 阶段 3：US ASCII 映射、delayable work 逐字符 press/release 执行、单宏 busy 策略，以及 host/native_sim 验证。
 
 ## 阶段 1：模块骨架与 behavior
 
@@ -16,12 +22,12 @@
 - 实现 `set`、`clear` 的保存和删除接口。
 - 验证重启后 slot 内容保留。
 
-## 阶段 3：ASCII 执行器
+## 阶段 3：ASCII 执行器（已完成）
 
-- 实现 US ASCII 到 HID usage/modifier 的转换表。
-- 使用 delayable work 逐字符发送 press/release。
-- 处理空 slot、非法字符、超长文本和重复触发。
-- 第一版只允许一个宏同时运行。
+- 已实现 US ASCII 到 HID usage/modifier 的转换表。
+- 已使用 delayable work 逐字符发送 press/release。
+- 已处理空 slot、非法字符、超长文本和重复触发。
+- 第一版只允许一个 runtime macro 同时执行，执行期间重复触发返回 busy；不实现并发宏队列。
 
 ## 阶段 4：模块自有 USB HID 通道与协议
 

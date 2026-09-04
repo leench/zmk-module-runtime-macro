@@ -6,11 +6,14 @@
 
 #define DT_DRV_COMPAT zmk_behavior_runtime_macro
 
+#include <errno.h>
+
 #include <zephyr/device.h>
 #include <zephyr/logging/log.h>
 #include <drivers/behavior.h>
 
 #include <zmk/behavior.h>
+#include <zmk/runtime_macro.h>
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
@@ -54,10 +57,13 @@ static int on_keymap_binding_pressed(struct zmk_behavior_binding *binding,
         return -EINVAL;
     }
 
-    // Phase 1: the behavior is recognized and validated; executing the slot
-    // text (Settings/NVS load + ASCII executor) arrives in later phases.
-    LOG_DBG("position %d slot %u (placeholder, nothing executed)", event.position,
-            binding->param1);
+    int err = zmk_runtime_macro_execute((uint8_t)binding->param1);
+    if (err != 0) {
+        LOG_ERR("Failed to start runtime macro slot %u (err %d)", binding->param1, err);
+        return err;
+    }
+
+    LOG_DBG("position %d started runtime macro slot %u", event.position, binding->param1);
     return ZMK_BEHAVIOR_OPAQUE;
 }
 

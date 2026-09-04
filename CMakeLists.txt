@@ -8,5 +8,14 @@
 if (CONFIG_ZMK_BEHAVIOR_RUNTIME_MACRO
     AND ((NOT CONFIG_ZMK_SPLIT) OR CONFIG_ZMK_SPLIT_ROLE_CENTRAL))
   zephyr_library()
-  zephyr_library_sources(src/behaviors/behavior_runtime_macro.c)
+  zephyr_library_include_directories(
+    include
+    ${APPLICATION_SOURCE_DIR}/include
+  )
+  zephyr_library_sources(
+    src/runtime_macro.c
+    src/runtime_macro_ascii.c
+    src/runtime_macro_executor.c
+    src/behaviors/behavior_runtime_macro.c
+  )
 endif() # CONFIG_ZMK_BEHAVIOR_RUNTIME_MACRO AND (unibody OR split central)

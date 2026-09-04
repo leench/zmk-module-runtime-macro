@@ -5,6 +5,7 @@ config ZMK_BEHAVIOR_RUNTIME_MACRO
     bool "Runtime Macro behavior"
     default y
     depends on DT_HAS_ZMK_BEHAVIOR_RUNTIME_MACRO_ENABLED
+    depends on SETTINGS
     help
       Enable the runtime_macro behavior that triggers the US ASCII text stored
       in one of the fixed macro slots (&runtime_macro <slot>).
@@ -25,7 +26,7 @@ config ZMK_RUNTIME_MACRO_MAX_TEXT_LEN
     range 1 256
     help
       Maximum number of US ASCII characters a single macro slot can hold.
-      Upper limit consumed by later phases (Settings/NVS persistence and the
-      ASCII executor); no RAM slot buffer is allocated yet.
+      The module allocates one NUL-terminated RAM buffer of this size per slot
+      and uses the same limit for Settings/NVS persistence and execution.
 
 endif # ZMK_BEHAVIOR_RUNTIME_MACRO
