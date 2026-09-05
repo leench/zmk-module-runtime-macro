@@ -10,8 +10,9 @@ data.
 - Phase 6 hardware validation is in progress.
 - One compatible central device has completed a real HID protocol round trip
   and slot read/write check.
-- Physical key output, USB reconnect behavior, reboot/NVS retention, and
-  portability across other boards and host backends still need validation.
+- Physical key output, reboot/NVS retention, and portability across other boards
+  and host backends still need validation. Firmware USB reconnect/reset lifecycle
+  handling is implemented; hardware rediscovery still needs validation.
 
 ## Completed phases
 
@@ -37,13 +38,22 @@ data.
 
 ### Phase 4: Protocol and optional USB HID transport
 
-- Fixed 32-byte v1 `LIST`, `GET`, `SET`, and `CLEAR` protocol.
-- 22-byte payload chunks and atomic SET staging.
+- Fixed 32-byte v2 `LIST`, `GET`, `SET`, and `CLEAR` protocol; v1 management
+  requests are rejected with `BAD_VERSION`.
+- Optional authenticated `AUTH_INFO`, challenge/proof login, password replacement,
+  and `LOCK` management commands; `OPEN` remains usable without a password.
+- 22-byte payload chunks, atomic SET staging, and 52-byte `PASSWORD_SET` staging.
 - Optional vendor USB HID transport (HID_1 by default) using Usage Page `0xff60` and Usage `0x61`.
 - HID_0 remains the normal ZMK keyboard interface.
 - Interrupt OUT remains disabled globally so HID_0 is not changed.
 - Central-only USB build, NVS build, transport-off build, and Studio CDC ACM
   coexistence build coverage.
+- Every USB connection-state notification conservatively clears sessions,
+  protocol staging, and queued requests; only an HID notification brings the
+  transport online, so reconnect or suspend/resume may require reauthentication.
+  IN buffer permits are recycled separately only at known endpoint-loss/configuration
+  boundaries, not for suspend/resume or unknown/error statuses. Unstable raw-status
+  sampling keeps the transport offline until a stable notification.
 
 ### Phase 5: Python client
 
@@ -77,8 +87,10 @@ data.
 
 ## Phase 7: Future client work
 
-- Keep the v1 wire protocol stable.
-- A graphical client may reuse the existing protocol.
+- The existing Python client is not yet upgraded to v2 authentication; a graphical
+  or background client must implement [`AUTHENTICATION_PROTOCOL.md`](AUTHENTICATION_PROTOCOL.md).
+- v1 is retained as a historical data-format reference, but current firmware
+  accepts only v2 management frames.
 - Unicode, new ZMK Studio RPC messages, dynamic layout detection, and a
   multi-macro queue require separate design decisions.
 
@@ -86,5 +98,6 @@ data.
 
 - No Unicode, Chinese text, or Emoji support in the current protocol.
 - No modifications to the ZMK main repository or ZMK Studio protobuf schema.
-- No authentication or encryption in the local USB configuration channel.
+- The protocol does not encrypt USB traffic; authentication protects management
+  operations when a password is configured.
 - No concurrent macro queue.

@@ -18,9 +18,34 @@
 
 #define CONFIG_SETTINGS 1
 #define CONFIG_ZMK_LOG_LEVEL 0
+#define CONFIG_ZMK_RUNTIME_MACRO_USB_HID 1
+#define CONFIG_ZMK_RUNTIME_MACRO_AUTH_TEST 1
+#define CONFIG_ZMK_RUNTIME_MACRO_AUTH_CHALLENGE_TIMEOUT 30
+#define CONFIG_ZMK_RUNTIME_MACRO_AUTH_SESSION_TIMEOUT 300
 #define CONFIG_ZMK_RUNTIME_MACRO_SLOT_COUNT 16
 #define CONFIG_ZMK_RUNTIME_MACRO_MAX_TEXT_LEN 64
 
+#define ZMK_RUNTIME_MACRO_AUTH_TEST 1
+
+int64_t host_uptime;
+
+int64_t runtime_macro_auth_test_now_ms(void) { return host_uptime; }
+
+int runtime_macro_auth_test_random(void *destination, size_t length) {
+  memset(destination, 0xa5, length);
+  return 0;
+}
+
+int runtime_macro_auth_test_hmac(const uint8_t *key, const uint8_t *input,
+                                 size_t input_length, uint8_t *output) {
+  (void)key;
+  (void)input;
+  (void)input_length;
+  memset(output, 0x5a, 32U);
+  return 0;
+}
+
+#include "../../src/runtime_macro_auth.c"
 #include "../../src/runtime_macro.c"
 #include "../../src/runtime_macro_ascii.c"
 #include "../../src/runtime_macro_protocol.c"
@@ -31,7 +56,7 @@ _Static_assert(ZMK_RUNTIME_MACRO_PROTOCOL_HEADER_SIZE == 10U,
                "header size changed");
 _Static_assert(ZMK_RUNTIME_MACRO_PROTOCOL_PAYLOAD_SIZE == 22U,
                "payload size changed");
-_Static_assert(ZMK_RUNTIME_MACRO_PROTOCOL_VERSION == 1U,
+_Static_assert(ZMK_RUNTIME_MACRO_PROTOCOL_VERSION == 2U,
                "protocol version changed");
 _Static_assert(ZMK_RUNTIME_MACRO_PROTOCOL_PAYLOAD_OFFSET == 10U,
                "payload offset changed");
@@ -91,6 +116,8 @@ int settings_delete(const char *name) {
 }
 
 static void reset_slots(void) {
+  runtime_macro_auth_test_reset();
+  host_uptime = 0;
   save_result = 0;
   delete_result = 0;
   for (uint8_t slot = 0; slot < CONFIG_ZMK_RUNTIME_MACRO_SLOT_COUNT; slot++) {
@@ -199,7 +226,7 @@ static void test_wire_constants(void) {
   EXPECT_EQ(32, ZMK_RUNTIME_MACRO_PROTOCOL_FRAME_SIZE);
   EXPECT_EQ(10, ZMK_RUNTIME_MACRO_PROTOCOL_HEADER_SIZE);
   EXPECT_EQ(22, ZMK_RUNTIME_MACRO_PROTOCOL_PAYLOAD_SIZE);
-  EXPECT_EQ(1, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION);
+  EXPECT_EQ(2, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION);
   EXPECT_EQ(0, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION_OFFSET);
   EXPECT_EQ(1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_OFFSET);
   EXPECT_EQ(2, ZMK_RUNTIME_MACRO_PROTOCOL_REQUEST_ID_OFFSET);
@@ -237,73 +264,73 @@ static void test_malformed_common_requests(void) {
   reset_slots();
   zmk_runtime_macro_protocol_init(&protocol);
 
-  make_request(request, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 1, 0,
+  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 1, 0,
                ZMK_RUNTIME_MACRO_PROTOCOL_LIST_SLOT, 0, 0, 0, NULL);
   memset(response, 0xaa, sizeof(response));
   process_request(&protocol, request, response);
-  expect_error(response, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 1,
+  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 1,
                ZMK_RUNTIME_MACRO_PROTOCOL_LIST_SLOT,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_VERSION);
 
-  make_request(request, 1, 0x99, 2, 0, 0xff, 0, 0, 0, NULL);
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, 0x99, 2, 0, 0xff, 0, 0, 0, NULL);
   memset(response, 0xaa, sizeof(response));
   process_request(&protocol, request, response);
-  expect_error(response, 1, 0x99, 2, 0xff,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, 0x99, 2, 0xff,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_OPCODE);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 3, 1, 0xff,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 3, 1, 0xff,
                0, 0, 0, NULL);
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 3, 0xff,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 3, 0xff,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 4, 0, 0, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 4, 0, 0, 0,
                0, 0, NULL);
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 4, 0,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 4, 0,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 5, 0, 0xff,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 5, 0, 0xff,
                0, 0, 1, &payload);
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 5, 0xff,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 5, 0xff,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_LENGTH);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 6, 0, 16, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 6, 0, 16, 0,
                0, 0, NULL);
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 6, 16,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 6, 16,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_SLOT);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 7, 0, 0, 0, 1,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 7, 0, 0, 0, 1,
                0, NULL);
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 7, 0,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 7, 0,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_LENGTH);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CLEAR, 8, 0, 0, 1,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CLEAR, 8, 0, 0, 1,
                0, 0, NULL);
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CLEAR, 8, 0,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CLEAR, 8, 0,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 9, 0, 16, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 9, 0, 16, 0,
                1, 1, &payload);
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 9, 16,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 9, 16,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_SLOT);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 10, 0, 0, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 10, 0, 0, 0,
                1, 23, NULL);
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 10, 0,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 10, 0,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_LENGTH);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 11, 0, 0, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 11, 0, 0, 0,
                0, 0, NULL);
   request[31] = 0x5a;
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 11, 0,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 11, 0,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST);
 
   EXPECT_EQ(-EINVAL,
@@ -317,7 +344,7 @@ static void test_malformed_common_requests(void) {
 
   memset(response, 0xaa, sizeof(response));
   EXPECT_EQ(0, zmk_runtime_macro_protocol_process(NULL, request, response));
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 11, 0,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 11, 0,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_INTERNAL);
 }
 
@@ -356,7 +383,7 @@ static void test_list_chunks_and_boundaries(void) {
   }
   zmk_runtime_macro_protocol_init(&protocol);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 20, 0, 0xff,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 20, 0, 0xff,
                0, 0, 0, NULL);
   memset(response, 0xaa, sizeof(response));
   process_request(&protocol, request, response);
@@ -367,7 +394,7 @@ static void test_list_chunks_and_boundaries(void) {
   EXPECT_EQ(23, response[15]);
   EXPECT_EQ(7, response[31]);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 21, 0, 0xff,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 21, 0, 0xff,
                22, 0, 0, NULL);
   process_request(&protocol, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 21, 0xff, 22,
@@ -381,16 +408,16 @@ static void test_list_chunks_and_boundaries(void) {
   EXPECT_EQ(0, response[12]);
   EXPECT_EQ(64, response[19]);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 22, 0, 0xff,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 22, 0, 0xff,
                33, 0, 0, NULL);
   process_request(&protocol, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 22, 0xff, 33,
                  33, NULL, 0);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 23, 0, 0xff,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 23, 0, 0xff,
                34, 0, 0, NULL);
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 23, 0xff,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 23, 0xff,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_OFFSET);
 }
 
@@ -407,49 +434,49 @@ static void test_get_chunks_and_boundaries(void) {
   set_slot_bytes(3, maximum, sizeof(maximum));
   zmk_runtime_macro_protocol_init(&protocol);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 30, 0, 0, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 30, 0, 0, 0,
                0, 0, NULL);
   process_request(&protocol, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 30, 0, 0, 0,
                  NULL, 0);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 31, 0, 2, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 31, 0, 2, 0,
                0, 0, NULL);
   process_request(&protocol, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 31, 2, 0, 23,
                  text23, 22);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 32, 0, 2, 22,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 32, 0, 2, 22,
                0, 0, NULL);
   process_request(&protocol, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 32, 2, 22, 23,
                  text23 + 22, 1);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 33, 0, 2, 23,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 33, 0, 2, 23,
                0, 0, NULL);
   process_request(&protocol, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 33, 2, 23, 23,
                  NULL, 0);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 34, 0, 2, 24,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 34, 0, 2, 24,
                0, 0, NULL);
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 34, 2,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 34, 2,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_OFFSET);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 35, 0, 3, 22,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 35, 0, 3, 22,
                0, 0, NULL);
   process_request(&protocol, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 35, 3, 22, 64,
                  maximum + 22, 22);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 36, 0, 3, 44,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 36, 0, 3, 44,
                0, 0, NULL);
   process_request(&protocol, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 36, 3, 44, 64,
                  maximum + 44, 20);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 37, 0, 3, 64,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 37, 0, 3, 64,
                0, 0, NULL);
   process_request(&protocol, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 37, 3, 64, 64,
@@ -468,7 +495,7 @@ static void test_set_single_empty_and_deferred_commit(void) {
   reset_backend();
   zmk_runtime_macro_protocol_init(&protocol);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 40, 0, 0, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 40, 0, 0, 0,
                5, 5, "hello");
   process_request(&protocol, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 40, 0, 5, 5,
@@ -482,7 +509,7 @@ static void test_set_single_empty_and_deferred_commit(void) {
 
   set_slot_text(0, "not-empty");
   reset_backend();
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 41, 0, 0, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 41, 0, 0, 0,
                0, 0, NULL);
   process_request(&protocol, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 41, 0, 0, 0,
@@ -492,7 +519,7 @@ static void test_set_single_empty_and_deferred_commit(void) {
 
   set_slot_text(1, "old");
   reset_backend();
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 42, 0, 1, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 42, 0, 1, 0,
                5, 2, first_chunk);
   process_request(&protocol, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 42, 1, 2, 5,
@@ -501,20 +528,20 @@ static void test_set_single_empty_and_deferred_commit(void) {
   EXPECT_EQ(0, save_calls);
   EXPECT_TRUE(protocol.set_active);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 43, 0, 0xff,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 43, 0, 0xff,
                0, 0, 0, NULL);
   process_request(&protocol, request, response);
   EXPECT_EQ(ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_OK, response[3]);
   EXPECT_TRUE(protocol.set_active);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 44, 0, 1, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 44, 0, 1, 0,
                0, 0, NULL);
   process_request(&protocol, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 44, 1, 0, 3,
                  "old", 3);
   EXPECT_TRUE(protocol.set_active);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 42, 0, 1, 2,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 42, 0, 1, 2,
                5, 3, second_chunk);
   process_request(&protocol, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 42, 1, 5, 5,
@@ -538,7 +565,7 @@ static void test_set_split_22_23_and_maximum(void) {
   reset_backend();
   zmk_runtime_macro_protocol_init(&protocol);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 50, 0, 2, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 50, 0, 2, 0,
                23, 22, text23);
   process_request(&protocol, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 50, 2, 22, 23,
@@ -546,7 +573,7 @@ static void test_set_split_22_23_and_maximum(void) {
   expect_slot(2, "old", 3);
   EXPECT_EQ(0, save_calls);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 50, 0, 2, 22,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 50, 0, 2, 22,
                23, 1, text23 + 22);
   process_request(&protocol, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 50, 2, 23, 23,
@@ -555,21 +582,21 @@ static void test_set_split_22_23_and_maximum(void) {
   EXPECT_EQ(1, save_calls);
 
   reset_backend();
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 51, 0, 3, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 51, 0, 3, 0,
                64, 22, maximum);
   process_request(&protocol, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 51, 3, 22, 64,
                  NULL, 0);
   EXPECT_EQ(0, save_calls);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 51, 0, 3, 22,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 51, 0, 3, 22,
                64, 22, maximum + 22);
   process_request(&protocol, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 51, 3, 44, 64,
                  NULL, 0);
   EXPECT_EQ(0, save_calls);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 51, 0, 3, 44,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 51, 0, 3, 44,
                64, 20, maximum + 44);
   process_request(&protocol, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 51, 3, 64, 64,
@@ -592,14 +619,14 @@ static void test_set_replacement_and_independent_contexts(void) {
   zmk_runtime_macro_protocol_init(&first);
   zmk_runtime_macro_protocol_init(&second);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 60, 0, 4, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 60, 0, 4, 0,
                5, 2, "ab");
   process_request(&first, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 60, 4, 2, 5,
                  NULL, 0);
   EXPECT_TRUE(first.set_active);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 61, 0, 5, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 61, 0, 5, 0,
                2, 2, "xy");
   process_request(&second, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 61, 5, 2, 2,
@@ -607,7 +634,7 @@ static void test_set_replacement_and_independent_contexts(void) {
   expect_slot(5, "xy", 2);
   EXPECT_TRUE(first.set_active);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 60, 0, 4, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 60, 0, 4, 0,
                2, 2, "zz");
   process_request(&first, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 60, 4, 2, 2,
@@ -616,17 +643,17 @@ static void test_set_replacement_and_independent_contexts(void) {
   EXPECT_TRUE(!first.set_active);
 
   reset_backend();
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 62, 0, 6, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 62, 0, 6, 0,
                4, 2, "ab");
   process_request(&first, request, response);
   EXPECT_TRUE(first.set_active);
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CLEAR, 63, 0, 7, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CLEAR, 63, 0, 7, 0,
                0, 0, NULL);
   process_request(&first, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CLEAR, 63, 7, 0, 0,
                  NULL, 0);
   EXPECT_TRUE(first.set_active);
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 62, 0, 6, 2,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 62, 0, 6, 2,
                4, 2, "cd");
   process_request(&first, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 62, 6, 4, 4,
@@ -645,28 +672,28 @@ static void test_set_duplicate_chunks_require_restart(void) {
   zmk_runtime_macro_protocol_init(&protocol);
 
   /* Repeating an already accepted non-final chunk invalidates staging. */
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 69, 0, 7, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 69, 0, 7, 0,
                6, 2, "ab");
   process_request(&protocol, request, response);
   EXPECT_TRUE(protocol.set_active);
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 69, 0, 7, 2,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 69, 0, 7, 2,
                6, 2, "cd");
   process_request(&protocol, request, response);
   EXPECT_TRUE(protocol.set_active);
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 69, 0, 7, 2,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 69, 0, 7, 2,
                6, 2, "cd");
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 69, 7,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 69, 7,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_OFFSET);
   EXPECT_TRUE(!protocol.set_active);
   expect_slot(7, "old", 3);
 
   /* A final ACK lost by the host is also recovered by restarting at offset 0.
    */
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 69, 0, 7, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 69, 0, 7, 0,
                4, 2, "ne");
   process_request(&protocol, request, response);
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 69, 0, 7, 2,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 69, 0, 7, 2,
                4, 2, "w!");
   process_request(&protocol, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 69, 7, 4, 4,
@@ -675,13 +702,13 @@ static void test_set_duplicate_chunks_require_restart(void) {
 
   /* The retransmitted final chunk has no active transaction to resume. */
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 69, 7,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 69, 7,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST);
   EXPECT_TRUE(!protocol.set_active);
   expect_slot(7, "new!", 4);
 
   /* Restarting from offset 0 is accepted after either recovery path. */
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 0, 7, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 0, 7, 0,
                2, 2, "ok");
   process_request(&protocol, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 7, 2, 2,
@@ -698,73 +725,73 @@ static void test_set_invalid_chunks_clear_staging(void) {
   set_slot_text(7, "keep");
   zmk_runtime_macro_protocol_init(&protocol);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 0, 7, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 0, 7, 0,
                4, 2, "ke");
   process_request(&protocol, request, response);
   EXPECT_TRUE(protocol.set_active);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 0, 7, 3,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 0, 7, 3,
                4, 1, "p");
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 7,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 7,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_OFFSET);
   EXPECT_TRUE(!protocol.set_active);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 0, 7, 2,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 0, 7, 2,
                4, 2, "ep");
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 7,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 7,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST);
   expect_slot(7, "keep", 4);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 0, 7, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 0, 7, 0,
                4, 2, "ke");
   process_request(&protocol, request, response);
   EXPECT_TRUE(protocol.set_active);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 71, 0, 7, 2,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 71, 0, 7, 2,
                4, 2, "ep");
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 71, 7,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 71, 7,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST);
   EXPECT_TRUE(!protocol.set_active);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 0, 7, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 0, 7, 0,
                4, 2, "ke");
   process_request(&protocol, request, response);
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 0, 8, 2,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 0, 8, 2,
                4, 2, "ep");
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 8,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 8,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST);
   EXPECT_TRUE(!protocol.set_active);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 0, 7, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 0, 7, 0,
                4, 2, "ke");
   process_request(&protocol, request, response);
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 0, 7, 2,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 0, 7, 2,
                5, 2, "ep");
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 7,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 7,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST);
   EXPECT_TRUE(!protocol.set_active);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 0, 7, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 0, 7, 0,
                4, 0, NULL);
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 7,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 7,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_LENGTH);
   EXPECT_TRUE(!protocol.set_active);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 0, 7, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 0, 7, 0,
                4, 2, "a\r");
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 7,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 7,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_INVALID_TEXT);
   EXPECT_TRUE(!protocol.set_active);
   expect_slot(7, "keep", 4);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 0, 7, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 0, 7, 0,
                2, 2, "ok");
   process_request(&protocol, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 70, 7, 2, 2,
@@ -783,64 +810,64 @@ static void test_set_range_validation_and_common_clear(void) {
   set_slot_text(8, "keep");
   zmk_runtime_macro_protocol_init(&protocol);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 0, 8, 1,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 0, 8, 1,
                1, 0, NULL);
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 8,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 8,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_LENGTH);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 0, 8, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 0, 8, 0,
                1, 2, payload);
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 8,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 8,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_LENGTH);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 0, 8, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 0, 8, 0,
                65, 1, payload);
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 8,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 8,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_LENGTH);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 0, 8, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 0, 8, 0,
                4, 1, payload);
   request[31] = 1;
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 8,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 8,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 0, 8, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 0, 8, 0,
                4, 2, "ab");
   process_request(&protocol, request, response);
   EXPECT_TRUE(protocol.set_active);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 1, 8, 2,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 1, 8, 2,
                4, 2, "cd");
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 8,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 8,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST);
   EXPECT_TRUE(!protocol.set_active);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 0, 8, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 0, 8, 0,
                4, 2, "ab");
   process_request(&protocol, request, response);
   EXPECT_TRUE(protocol.set_active);
-  make_request(request, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 0, 8, 2,
+  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 0, 8, 2,
                4, 2, "cd");
   process_request(&protocol, request, response);
-  expect_error(response, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 8,
+  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 8,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_VERSION);
   EXPECT_TRUE(!protocol.set_active);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 0, 8, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 0, 8, 0,
                0, 1, "x");
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 8,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 8,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_LENGTH);
 
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 0, 8, 1,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 0, 8, 1,
                0, 0, NULL);
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 8,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 80, 8,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_OFFSET);
   expect_slot(8, "keep", 4);
 }
@@ -856,17 +883,17 @@ static void test_storage_errors_and_clear(void) {
   zmk_runtime_macro_protocol_init(&protocol);
 
   save_result = -EIO;
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 90, 0, 9, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 90, 0, 9, 0,
                3, 3, "new");
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 90, 9,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 90, 9,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_STORAGE_ERROR);
   expect_slot(9, "new", 3);
   EXPECT_EQ(1, save_calls);
   EXPECT_TRUE(!protocol.set_active);
 
   reset_backend();
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CLEAR, 91, 0, 9, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CLEAR, 91, 0, 9, 0,
                0, 0, NULL);
   process_request(&protocol, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CLEAR, 91, 9, 0, 0,
@@ -877,10 +904,10 @@ static void test_storage_errors_and_clear(void) {
   set_slot_text(9, "again");
   reset_backend();
   delete_result = -ENOSPC;
-  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CLEAR, 92, 0, 9, 0,
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CLEAR, 92, 0, 9, 0,
                0, 0, NULL);
   process_request(&protocol, request, response);
-  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CLEAR, 92, 9,
+  expect_error(response, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CLEAR, 92, 9,
                ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_STORAGE_ERROR);
   expect_slot(9, "", 0);
   EXPECT_EQ(1, delete_calls);

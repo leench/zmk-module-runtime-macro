@@ -1,11 +1,17 @@
-# Runtime Macro Protocol v1
+# Runtime Macro Protocol v1 (historical)
 
-This document defines the 32-byte transport-independent runtime macro protocol and
-its optional USB HID mapping. The protocol core receives complete frames and is
-called by one serialized work consumer; it does not create a thread, queue, or USB
-device.
+This document records the original 32-byte transport-independent runtime macro
+protocol and its optional USB HID mapping. The current firmware implements the
+same slot and chunk data semantics as **v2**, adds authenticated management
+commands, and rejects v1 management requests with `BAD_VERSION`. See
+[`AUTHENTICATION_PROTOCOL.md`](AUTHENTICATION_PROTOCOL.md) for the v2 wire and
+authentication contract.
 
-See [`CLI.md`](CLI.md) for the reference Python client's command-line and module APIs.
+The protocol core receives complete frames and is called by one serialized work
+consumer; it does not create a thread, queue, or USB device.
+
+See [`CLI.md`](CLI.md) for the reference Python client's command-line and module APIs;
+the existing client has not yet been upgraded to v2 authentication.
 
 ## Frame
 
@@ -14,7 +20,7 @@ transport）负责提供 report 边界和可靠传输。
 
 | Byte | Size | Field | Meaning |
 | ---: | ---: | --- | --- |
-| 0 | 1 | `version` | Protocol version; v1 is `1` |
+| 0 | 1 | `version` | Historical v1 is `1`; current firmware uses v2 (`2`) |
 | 1 | 1 | `opcode` | `LIST=1`, `GET=2`, `SET=3`, `CLEAR=4` |
 | 2 | 1 | `request_id` | Opaque request identifier, echoed by the response |
 | 3 | 1 | `status` | Request must be `0`; response contains a status code |
@@ -38,7 +44,11 @@ A canonical request also zero-fills the part of the payload after
 with `BAD_REQUEST` (or `BAD_LENGTH` when the declared payload length itself is too
 large for a `SET`).
 
-## Opcodes
+## Opcodes (historical v1 set)
+
+The following table is the v1 command set. In current firmware these four
+opcodes use version `2` and are subject to the OPEN/PROTECTED authentication
+gate documented in [`AUTHENTICATION_PROTOCOL.md`](AUTHENTICATION_PROTOCOL.md).
 
 | Name | Value | Description |
 | --- | ---: | --- |
@@ -206,4 +216,17 @@ Only one IN transfer is in flight; the completion callback releases the send
 permit and schedules the next queued request. The 32-byte response buffer is
 static storage and remains unchanged until `int_in_ready` confirms completion.
 A failed write releases the permit so the host can retry; the firmware does not
-add a second retry protocol.
+add a second retry protocol. Every ZMK USB connection-state notification,
+including one reporting HID, performs a logical fail-closed reset of the
+authentication core, protocol staging, queued requests, and generation. Only
+after a stable HID notification does the transport become online again;
+suspend/resume notifications may therefore require reauthentication. The raw status mapping
+must also agree with the event (`SUSPEND`/`CONFIGURED`/`RESUME`/
+`CLEAR_HALT`/`SOF` → HID, `DISCONNECTED`/`UNKNOWN` → NONE, all others →
+POWERED). If the raw USB status changes during asynchronous event handling, the
+transport also remains offline until a stable matching notification. Endpoint-owned
+IN buffer recovery is separate: the legacy permit is recycled only for raw
+`USB_DC_RESET`, `USB_DC_DISCONNECTED`, or
+`USB_DC_CONFIGURED` statuses. A SUSPEND/RESUME/CLEAR_HALT (or unknown/error)
+status retains the permit until the normal `DATA_IN` callback or a later known
+endpoint boundary.

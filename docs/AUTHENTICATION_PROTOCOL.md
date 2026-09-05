@@ -1,9 +1,10 @@
 # Runtime Macro 密码认证协议（v2 设计契约）
 
-> **状态：已批准设计，尚未在固件中实现。**
+> **状态：固件已实现；桌面 GUI/CLI 尚未升级。**
 >
-> 本文是固件、桌面 GUI 和后台应用共同遵循的 v2 开发契约。当前固件仍实现
-> [`PROTOCOL.md`](PROTOCOL.md) 中无认证的 v1 协议；客户端在检测到 v1 固件时不得误认为下述认证能力已经可用。
+> 本文是固件、桌面 GUI 和后台应用共同遵循的 v2 wire 契约。当前固件使用
+> [`PROTOCOL.md`](PROTOCOL.md) 所述 v2 frame，并拒绝 v1 的宏管理命令；客户端必须
+> 实现本文认证流程后才能管理 `PROTECTED` 设备。
 
 ## 1. 目标
 
@@ -31,6 +32,8 @@ v2 为 Runtime Macro 的 USB HID 管理通道增加可选密码保护，同时�
 不开启 ZMK Studio 时，普通 keyboard HID 不提供完整 keymap、层或键位绑定读取接口。将 Runtime Macro 按键放在需要组合键进入的隐藏层，只是降低物理试键发现宏的概率，不属于密码协议的一部分。
 
 设备进入认证管理窗口后，该窗口对整个 Runtime Macro HID interface 生效，不绑定到某个 GUI 进程。因此同一主机上的其他进程可能在窗口有效期间利用该窗口。该限制在当前个人使用威胁模型内可以接受。
+
+每个 `zmk_usb_conn_state_changed` 通知都会执行一次保守的逻辑 transport reset，先置离线，再清除认证窗口、challenge、协议事务、排队请求并递增 generation；只有该通知状态为 `ZMK_USB_CONN_HID` 且原始 USB status 双采样稳定时，逻辑清理完成后才重新接受请求。因此即使 ZMK 将快速 RESET/DISCONNECTED→CONFIGURED 通知合并为最终 HID 通知，也不会保留旧会话。IN response buffer 的 endpoint ownership 与逻辑清理分开处理：固件只在原始 `zmk_usb_get_status()` 明确为 `USB_DC_RESET`、`USB_DC_DISCONNECTED` 或 `USB_DC_CONFIGURED` 时回收 permit；`USB_DC_SUSPEND`、`USB_DC_RESUME`、`USB_DC_CLEAR_HALT` 以及 CONNECTED/UNKNOWN/ERROR 等状态保留 permit，等待正常 `DATA_IN` 或后续已知安全边界。异步通知期间状态双采样不稳定时既不提前回收 permit，也保持 transport offline，等待后续稳定通知；即使双采样稳定，也只有 raw status 映射出的 `zmk_usb_get_conn_state()` 与 event 的 `conn_state` 一致时才上线。该映射与 ZMK 保持一致：SUSPEND/CONFIGURED/RESUME/CLEAR_HALT/SOF 为 HID，DISCONNECTED/UNKNOWN 为 NONE，其余为 POWERED。由于 suspend/resume 等 USB 状态也可能映射为 HID，客户端应准备重新查询 `AUTH_INFO` 并重新认证。
 
 ## 3. 状态模型
 
@@ -72,9 +75,12 @@ settings reset 通常还会清除 Runtime Macro slots、蓝牙配对和其他 ZM
 - 未完成的 `SET` staging；
 - 未完成的 `PASSWORD_SET` staging。
 
-这些状态不得写入 Settings。认证窗口过期时必须清除所有 staging。重启、USB disconnect/reset、认证成功、密码成功变更或 Settings 凭据重新加载时，清除认证窗口、challenge、失败计数/限速和所有 staging。显式 `LOCK` 只清除认证窗口、challenge 和所有 staging，保留失败计数及 cooldown，防止未认证客户端通过反复 `LOCK` 绕过限速。
+这些状态不得写入 Settings。认证窗口过期时必须清除所有 staging。重启、每个 USB connection-state 通知、认证成功、密码成功变更或 Settings 凭据重新加载时，清除认证窗口、challenge、失败计数/限速和所有 staging。显式 `LOCK` 只清除认证窗口、challenge 和所有 staging，保留失败计数及 cooldown，防止未认证客户端通过反复 `LOCK` 绕过限速。
 
-默认认证窗口为最后一次成功受保护管理操作后的 5 分钟。实现阶段应提供 Kconfig 调整项；`AUTH_INFO` 不延长窗口。challenge 默认 30 秒过期，并且最多用于一次 `AUTH_PROVE` 尝试。
+默认认证窗口为最后一次成功受保护管理操作后的 5 分钟，可通过
+`CONFIG_ZMK_RUNTIME_MACRO_AUTH_SESSION_TIMEOUT` 调整；`AUTH_INFO` 不延长窗口。
+challenge 默认 30 秒过期，可通过 `CONFIG_ZMK_RUNTIME_MACRO_AUTH_CHALLENGE_TIMEOUT`
+调整，并且最多用于一次 `AUTH_PROVE` 尝试。
 
 ## 4. 密码和凭据
 
@@ -121,7 +127,7 @@ K = PBKDF2-HMAC-SHA256(
 - nonce 只保存在 RAM。
 - nonce 默认 30 秒过期。
 - 一次 `AUTH_PROVE` 尝试后，无论成功或失败，nonce 都立即作废。
-- USB disconnect/reset、`LOCK` 和密码变更会立即作废 nonce。
+- 每个 USB connection-state 通知、`LOCK` 和密码变更都会立即作废 nonce。
 
 ### 5.2 Proof
 
@@ -145,7 +151,7 @@ ASCII domain 字符串不包含结尾 NUL；`||` 表示直接拼接。wire 中�
 cooldown_seconds = min(2^(n - 1), 8)
 ```
 
-限速期内的 `AUTH_CHALLENGE` 返回 `RATE_LIMITED`，不生成 nonce。认证成功、重启或 USB disconnect/reset（transport reset）后连续失败计数及 cooldown 归零；显式 `LOCK` 不清除它们。客户端收到 `RATE_LIMITED` 后应等待，不得高频轮询；无法获知其他客户端造成的失败计数时至少等待 8 秒再重试。
+限速期内的 `AUTH_CHALLENGE` 返回 `RATE_LIMITED`，不生成 nonce。认证成功、重启或任一 USB connection-state 通知（transport reset）后连续失败计数及 cooldown 归零；显式 `LOCK` 不清除它们。客户端收到 `RATE_LIMITED` 后应等待，不得高频轮询；无法获知其他客户端造成的失败计数时至少等待 8 秒再重试。
 
 该限速只减少在线猜测，不阻止攻击者利用公开 salt、nonce 和 proof 进行离线字典攻击。
 
@@ -359,7 +365,7 @@ Request 与 `AUTH_INFO` 的空 request 约束相同。`LOCK` 始终允许且幂�
 | `PROTECTED` 且窗口有效 | 处理成功后刷新 5 分钟 inactivity timeout |
 | `PROTECTED` 且窗口无效 | 返回 `AUTH_REQUIRED` |
 
-任何会话过期、`LOCK`、USB disconnect/reset 或密码成功变更必须丢弃未完成的多包 `SET`。不能允许认证前开始的事务在认证后继续，也不能允许认证窗口内开始的事务在窗口过期后提交。
+任何会话过期、`LOCK`、USB connection-state 通知或密码成功变更必须丢弃未完成的多包 `SET`。不能允许认证前开始的事务在认证后继续，也不能允许认证窗口内开始的事务在窗口过期后提交。
 
 宏按键执行不经过本协议，不要求密码，也不创建或刷新认证窗口。
 
@@ -475,7 +481,7 @@ OS credential store 只能在设备确认新凭据已经生效后更新。最终
 - 正确、错误、重复、过期和缺失 challenge；
 - constant-time proof 比较路径；
 - 限速不阻塞协议 worker；
-- 认证 timeout、`LOCK`、USB disconnect/reset、重启的 session/challenge/staging 清理，以及 `LOCK` 保留失败限速、transport reset/认证成功清除失败限速；
+- 认证 timeout、`LOCK`、每个 USB connection-state 通知、重启的 session/challenge/staging 清理，以及 `LOCK` 保留失败限速、transport reset/认证成功清除失败限速；
 - `SET/PASSWORD_SET` staging 在所有失效边界正确丢弃；
 - `PASSWORD_SET` Settings 失败时旧凭据仍可用；
 - 密码变更成功后旧凭据和旧会话立即失效；

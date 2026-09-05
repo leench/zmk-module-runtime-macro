@@ -10,7 +10,7 @@ build_dir=${TMPDIR:-/tmp}/zmk-runtime-macro-tests
 mkdir -p "$build_dir"
 
 common_cflags="-std=c11 -Wall -Wextra -Werror -pedantic -pthread -I$root_dir/tests/host/stubs -I$root_dir/include"
-test_sources="runtime_macro_slots_test runtime_macro_executor_test runtime_macro_protocol_test runtime_macro_usb_hid_test runtime_macro_auth_test"
+test_sources="runtime_macro_slots_test runtime_macro_executor_test runtime_macro_protocol_test runtime_macro_usb_hid_test runtime_macro_auth_test runtime_macro_auth_protocol_test"
 
 test_suite() {
     compiler=$1
