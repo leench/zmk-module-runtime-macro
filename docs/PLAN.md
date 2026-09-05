@@ -6,8 +6,10 @@ data.
 
 ## Status
 
-- Phases 1–5 are implemented and committed.
-- Phase 6 hardware validation is in progress.
+- Phases 1–5 are implemented and committed, including the v2-authenticated
+  reference Python client.
+- Phase 6 hardware validation is in progress; physical password authentication
+  has not yet been verified.
 - One compatible central device has completed a real HID protocol round trip
   and slot read/write check.
 - Physical key output, reboot/NVS retention, and portability across other boards
@@ -55,13 +57,18 @@ data.
   boundaries, not for suspend/resume or unknown/error statuses. Unstable raw-status
   sampling keeps the transport offline until a stable notification.
 
-### Phase 5: Python client
+### Phase 5: Python client and authentication CLI
 
-- `hidapi` client with `list`, `get`, `set`, and `clear`.
-- Explicit path, VID/PID filtering, fixed-frame validation, pagination, and
-  transaction restart handling.
-- 32/33-byte report compatibility and stale-response deadline handling.
-- Fake-HID tests and documented Python module API.
+- v2 `hidapi` client with `auth-info`, `login`, `set-password`, `lock`,
+  `list`, `get`, `set`, and `clear`.
+- `AuthInfo` API with strict OPEN/PROTECTED metadata validation.
+- NFC/UTF-8 password handling, PBKDF2-HMAC-SHA256 derivation, and truncated
+  HMAC challenge-response proofs.
+- Password setup/replacement with 52-byte 22/22/8 chunking, salt confirmation
+  after final-ACK loss, and no credential persistence.
+- Explicit path, VID/PID filtering, fixed-frame validation, pagination, 32/33-byte
+  report compatibility, stale-response handling, and transaction restart logic.
+- Fake-HID tests covering authentication, retries, v1 rejection, and CLI input.
 
 ## Phase 6: Hardware validation
 
@@ -87,12 +94,13 @@ data.
 
 ## Phase 7: Future client work
 
-- The existing Python client is not yet upgraded to v2 authentication; a graphical
-  or background client must implement [`AUTHENTICATION_PROTOCOL.md`](AUTHENTICATION_PROTOCOL.md).
+- A graphical or background client may reuse the completed Python client's v2
+  authentication flow and must implement [`AUTHENTICATION_PROTOCOL.md`](AUTHENTICATION_PROTOCOL.md).
 - v1 is retained as a historical data-format reference, but current firmware
-  accepts only v2 management frames.
-- Unicode, new ZMK Studio RPC messages, dynamic layout detection, and a
-  multi-macro queue require separate design decisions.
+  and the reference client use only v2 management frames; there is no fallback.
+- OS credential-store integration, Unicode, new ZMK Studio RPC messages,
+  dynamic layout detection, and a multi-macro queue require separate design
+  decisions.
 
 ## Explicit non-goals
 

@@ -1,8 +1,11 @@
 import contextlib
+import hashlib
+import hmac
 import io
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parents[2] / "tools"))
 import runtime_macro_cli as cli
@@ -140,6 +143,30 @@ def page_responder(logical, *, total=None):
     return reply
 
 
+def auth_info_payload(
+    *, configured, authenticated=False, iterations=600000, salt=bytes(16)
+):
+    flags = 0
+    if configured:
+        flags |= cli.AUTH_FLAG_PASSWORD_CONFIGURED
+    if authenticated:
+        flags |= cli.AUTH_FLAG_SESSION_AUTHENTICATED
+    return bytes([flags, cli.AUTH_KDF_ID]) + iterations.to_bytes(4, "little") + bytes(salt)
+
+
+def empty_ack(request):
+    frame = bytearray(32)
+    frame[0] = request[0]
+    frame[1] = request[1]
+    frame[2] = request[2]
+    frame[4] = request[4]
+    return bytes(frame)
+
+
+def opcode(wire):
+    return wire[1 + cli.OPCODE_OFFSET]
+
+
 class ClientTests(unittest.TestCase):
     def make_client(
         self, responder=None, records=None, *, device=None, clock=None, retries=1
@@ -211,7 +238,7 @@ class ClientTests(unittest.TestCase):
         def reply(device, wire):
             self.assertEqual(33, len(wire))
             self.assertEqual(b"\0", wire[:1])
-            expected = bytes([1, 4, 0, 0, 2, 0, 0, 0, 0, 0] + [0] * 22)
+            expected = bytes([2, 4, 0, 0, 2, 0, 0, 0, 0, 0] + [0] * 22)
             self.assertEqual(expected, wire[1:])
             device.read_queue.append(response(wire[1:], offset=0, total=0))
 
@@ -263,7 +290,7 @@ class ClientTests(unittest.TestCase):
 
         device.read_handler = stale_read
         transport = cli.HidTransport(device, clock=clock)
-        request = bytes([1, 4, 0, 0, 0, 0, 0, 0, 0, 0] + [0] * 22)
+        request = bytes([2, 4, 0, 0, 0, 0, 0, 0, 0, 0] + [0] * 22)
         with self.assertRaises(cli.TimeoutError):
             transport.exchange(request, 10)
         self.assertGreaterEqual(clock.now, 0.010)
@@ -423,10 +450,10 @@ class ClientTests(unittest.TestCase):
         client, device = self.make_client(reply, retries=0)
         client.set_slot(7, b"A" * 23)
         expected_first = bytearray(32)
-        expected_first[:10] = bytes([1, 3, 0, 0, 7, 22, 0, 0, 23, 0])
+        expected_first[:10] = bytes([2, 3, 0, 0, 7, 22, 0, 0, 23, 0])
         expected_first[10:32] = b"A" * 22
         expected_second = bytearray(32)
-        expected_second[:10] = bytes([1, 3, 0, 0, 7, 1, 22, 0, 23, 0])
+        expected_second[:10] = bytes([2, 3, 0, 0, 7, 1, 22, 0, 23, 0])
         expected_second[10:11] = b"A"
         self.assertEqual(b"\0" + bytes(expected_first), device.writes[0])
         self.assertEqual(b"\0" + bytes(expected_second), device.writes[1])
@@ -563,6 +590,530 @@ class ClientTests(unittest.TestCase):
             cli.validate_ascii(b"\xff")
 
 
+class AuthClientTests(unittest.TestCase):
+    def make_client(
+        self, responder=None, records=None, *, device=None, clock=None, retries=1
+    ):
+        device = device or FakeDevice(responder)
+        module = FakeHid([record()] if records is None else records, device)
+        transport = cli.open_transport(module, clock=clock or cli.time.monotonic)
+        self.addCleanup(transport.close)
+        return (
+            cli.RuntimeMacroClient(transport, timeout_ms=10, retries=retries),
+            device,
+        )
+
+    def test_auth_info_open_and_protected_have_strict_public_layout(self):
+        def open_reply(device, wire):
+            request = wire[1:]
+            expected = bytes([2, cli.OPCODE_AUTH_INFO, 0, 0, 0xFF, 0, 0, 0, 0, 0]) + bytes(22)
+            self.assertEqual(expected, request)
+            device.read_queue.append(
+                response(
+                    request,
+                    payload=auth_info_payload(configured=False),
+                    offset=0,
+                    total=cli.AUTH_INFO_SIZE,
+                )
+            )
+
+        client, device = self.make_client(open_reply, retries=0)
+        info = client.auth_info()
+        self.assertEqual("OPEN", info.state)
+        self.assertTrue(info.open)
+        self.assertFalse(info.authenticated)
+        self.assertEqual(cli.AUTH_ITERATIONS_DEFAULT, info.iterations)
+        self.assertEqual(bytes(16), info.salt)
+        self.assertEqual(1, len(device.writes))
+
+        salt = b"0123456789abcdef"
+
+        def protected_reply(device, wire):
+            request = wire[1:]
+            device.read_queue.append(
+                response(
+                    request,
+                    payload=auth_info_payload(
+                        configured=True,
+                        authenticated=True,
+                        iterations=100000,
+                        salt=salt,
+                    ),
+                    offset=0,
+                    total=cli.AUTH_INFO_SIZE,
+                )
+            )
+
+        client, _ = self.make_client(protected_reply, retries=0)
+        info = client.auth_info()
+        self.assertEqual("PROTECTED", info.state)
+        self.assertTrue(info.protected)
+        self.assertTrue(info.authenticated)
+        self.assertEqual(100000, info.iterations)
+        self.assertEqual(salt, info.salt)
+
+    def test_auth_info_rejects_bad_length_flags_kdf_and_metadata(self):
+        cases = [
+            {"payload": bytes(21), "total": 21},
+            {
+                "payload": bytes([0x04, cli.AUTH_KDF_ID])
+                + (600000).to_bytes(4, "little")
+                + bytes(16),
+                "total": 22,
+            },
+            {
+                "payload": bytes([0, 99])
+                + (600000).to_bytes(4, "little")
+                + bytes(16),
+                "total": 22,
+            },
+            {
+                "payload": auth_info_payload(
+                    configured=False, salt=b"x" + bytes(15)
+                ),
+                "total": 22,
+            },
+            {
+                "payload": auth_info_payload(
+                    configured=True, iterations=100000, salt=bytes(16)
+                ),
+                "total": 22,
+            },
+        ]
+        for case in cases:
+            with self.subTest(case=case):
+                def reply(device, wire, *, case=case):
+                    device.read_queue.append(
+                        response(
+                            wire[1:],
+                            payload=case["payload"],
+                            total=case["total"],
+                        )
+                    )
+
+                client, _ = self.make_client(reply, retries=0)
+                with self.assertRaises(cli.ProtocolError):
+                    client.auth_info()
+
+    def test_nfc_utf8_pbkdf2_known_vector_and_validation(self):
+        salt = b"1234567890abcdef"
+        self.assertEqual(b"\xc3\xa9", cli.normalize_password("e\u0301"))
+        self.assertEqual(
+            "62bd92e0e20fec971905b7a53c6f1a86f5091a4d60704c7827ca8a9464707172",
+            cli.derive_key("e\u0301", salt, 100000).hex(),
+        )
+        with self.assertRaises(ValueError):
+            cli.normalize_password("")
+        with self.assertRaises(ValueError):
+            cli.derive_key("x", bytes(16), 100000)
+        with self.assertRaises(ValueError):
+            cli.derive_key("x", salt, cli.AUTH_ITERATIONS_MIN - 1)
+        with self.assertRaises(ValueError):
+            cli.derive_key("x", salt, cli.AUTH_ITERATIONS_MAX + 1)
+
+    def test_authenticate_emits_complete_v2_wire_sequence(self):
+        password = "e\u0301"
+        salt = b"0123456789abcdef"
+        nonce = bytes(range(1, 17))
+        key = hashlib.pbkdf2_hmac("sha256", "é".encode(), salt, 100000, dklen=32)
+        expected_proof = hmac.new(
+            key, cli.AUTH_DOMAIN + nonce, hashlib.sha256
+        ).digest()[:16]
+        seen = []
+
+        def reply(device, wire):
+            request = wire[1:]
+            seen.append(request)
+            if request[1] == cli.OPCODE_AUTH_INFO:
+                device.read_queue.append(
+                    response(
+                        request,
+                        payload=auth_info_payload(
+                            configured=True, iterations=100000, salt=salt
+                        ),
+                        total=22,
+                    )
+                )
+            elif request[1] == cli.OPCODE_AUTH_CHALLENGE:
+                device.read_queue.append(response(request, payload=nonce, total=16))
+            elif request[1] == cli.OPCODE_AUTH_PROVE:
+                self.assertEqual(expected_proof, request[10:26])
+                self.assertEqual(16, request[5])
+                self.assertEqual(16, int.from_bytes(request[8:10], "little"))
+                device.read_queue.append(empty_ack(request))
+            else:
+                self.fail(f"unexpected opcode {request[1]}")
+
+        client, device = self.make_client(reply, retries=0)
+        result = client.authenticate(password)
+        self.assertEqual("PROTECTED", result.state)
+        self.assertTrue(result.authenticated)
+        self.assertEqual(
+            [cli.OPCODE_AUTH_INFO, cli.OPCODE_AUTH_CHALLENGE, cli.OPCODE_AUTH_PROVE],
+            [request[1] for request in seen],
+        )
+        self.assertEqual([0, 1, 2], [request[2] for request in seen])
+        self.assertEqual(3, len(device.writes))
+
+    def test_authenticate_wrong_password_rate_limit_and_bad_challenge(self):
+        salt = b"0123456789abcdef"
+
+        def wrong_password(device, wire):
+            request = wire[1:]
+            if request[1] == cli.OPCODE_AUTH_INFO:
+                device.read_queue.append(
+                    response(
+                        request,
+                        payload=auth_info_payload(
+                            configured=True, iterations=100000, salt=salt
+                        ),
+                        total=22,
+                    )
+                )
+            elif request[1] == cli.OPCODE_AUTH_CHALLENGE:
+                device.read_queue.append(response(request, payload=b"n" * 16, total=16))
+            else:
+                device.read_queue.append(response(request, status=cli.STATUS_AUTH_FAILED))
+
+        client, _ = self.make_client(wrong_password, retries=0)
+        with self.assertRaises(cli.RemoteError) as ctx:
+            client.authenticate("wrong")
+        self.assertEqual(cli.STATUS_AUTH_FAILED, ctx.exception.status)
+
+        def rate_limited(device, wire):
+            request = wire[1:]
+            if request[1] == cli.OPCODE_AUTH_INFO:
+                device.read_queue.append(
+                    response(
+                        request,
+                        payload=auth_info_payload(
+                            configured=True, iterations=100000, salt=salt
+                        ),
+                        total=22,
+                    )
+                )
+            else:
+                device.read_queue.append(response(request, status=cli.STATUS_RATE_LIMITED))
+
+        client, device = self.make_client(rate_limited, retries=2)
+        with self.assertRaises(cli.RemoteError) as ctx:
+            client.authenticate("wrong")
+        self.assertEqual(cli.STATUS_RATE_LIMITED, ctx.exception.status)
+        self.assertEqual(2, len(device.writes))
+
+        def malformed_challenge(device, wire):
+            request = wire[1:]
+            if request[1] == cli.OPCODE_AUTH_INFO:
+                device.read_queue.append(
+                    response(
+                        request,
+                        payload=auth_info_payload(
+                            configured=True, iterations=100000, salt=salt
+                        ),
+                        total=22,
+                    )
+                )
+            else:
+                device.read_queue.append(response(request, payload=b"n" * 15, total=15))
+
+        client, device = self.make_client(malformed_challenge, retries=0)
+        with self.assertRaises(cli.ProtocolError):
+            client.authenticate("password")
+        self.assertEqual(2, len(device.writes))
+
+    def test_auth_prove_timeout_restarts_with_new_nonce_id_and_proof(self):
+        salt = b"0123456789abcdef"
+        nonces = [bytes(range(1, 17)), bytes(range(17, 33))]
+        proof_values = []
+        challenge_count = 0
+        prove_count = 0
+
+        def reply(device, wire):
+            nonlocal challenge_count, prove_count
+            request = wire[1:]
+            if request[1] == cli.OPCODE_AUTH_INFO:
+                device.read_queue.append(
+                    response(
+                        request,
+                        payload=auth_info_payload(
+                            configured=True, iterations=100000, salt=salt
+                        ),
+                        total=22,
+                    )
+                )
+            elif request[1] == cli.OPCODE_AUTH_CHALLENGE:
+                nonce = nonces[challenge_count]
+                challenge_count += 1
+                device.read_queue.append(response(request, payload=nonce, total=16))
+            elif request[1] == cli.OPCODE_AUTH_PROVE:
+                proof_values.append(request[10:26])
+                prove_count += 1
+                if prove_count == 2:
+                    device.read_queue.append(empty_ack(request))
+            else:
+                self.fail(f"unexpected opcode {request[1]}")
+
+        client, device = self.make_client(reply, retries=1)
+        result = client.authenticate("password")
+        self.assertTrue(result.authenticated)
+        self.assertEqual(2, challenge_count)
+        self.assertEqual(2, prove_count)
+        self.assertEqual(
+            [
+                cli.OPCODE_AUTH_INFO,
+                cli.OPCODE_AUTH_CHALLENGE,
+                cli.OPCODE_AUTH_PROVE,
+                cli.OPCODE_AUTH_INFO,
+                cli.OPCODE_AUTH_CHALLENGE,
+                cli.OPCODE_AUTH_PROVE,
+            ],
+            [opcode(wire) for wire in device.writes],
+        )
+        self.assertEqual([0, 1, 2, 3, 4, 5], [request_field(wire, 2) for wire in device.writes])
+        self.assertNotEqual(proof_values[0], proof_values[1])
+
+    def test_password_set_open_uses_22_22_8_same_id_then_reauthenticates(self):
+        salt = b"abcdefghijklmnop"
+        iterations = 100000
+        password = "n\u0303ew"
+        normalized = "ñew".encode()
+        key = hashlib.pbkdf2_hmac("sha256", normalized, salt, iterations, dklen=32)
+        credential = iterations.to_bytes(4, "little") + salt + key
+        nonce = b"N" * 16
+        auth_info_count = 0
+        password_frames = []
+
+        def reply(device, wire):
+            nonlocal auth_info_count
+            request = wire[1:]
+            if request[1] == cli.OPCODE_AUTH_INFO:
+                auth_info_count += 1
+                configured = auth_info_count > 1
+                device.read_queue.append(
+                    response(
+                        request,
+                        payload=auth_info_payload(
+                            configured=configured,
+                            iterations=iterations if configured else 600000,
+                            salt=salt if configured else bytes(16),
+                        ),
+                        total=22,
+                    )
+                )
+            elif request[1] == cli.OPCODE_PASSWORD_SET:
+                password_frames.append(request)
+                offset = int.from_bytes(request[6:8], "little")
+                length = request[5]
+                device.read_queue.append(
+                    response(request, offset=offset + length, total=52)
+                )
+            elif request[1] == cli.OPCODE_AUTH_CHALLENGE:
+                device.read_queue.append(response(request, payload=nonce, total=16))
+            elif request[1] == cli.OPCODE_AUTH_PROVE:
+                expected = hmac.new(
+                    key, cli.AUTH_DOMAIN + nonce, hashlib.sha256
+                ).digest()[:16]
+                self.assertEqual(expected, request[10:26])
+                device.read_queue.append(empty_ack(request))
+            else:
+                self.fail(f"unexpected opcode {request[1]}")
+
+        client, device = self.make_client(reply, retries=0)
+        with mock.patch.object(cli.secrets, "token_bytes", return_value=salt):
+            result = client.set_password(password, iterations=iterations)
+        self.assertTrue(result.authenticated)
+        self.assertEqual([22, 22, 8], [request[5] for request in password_frames])
+        self.assertEqual([0, 22, 44], [int.from_bytes(request[6:8], "little") for request in password_frames])
+        self.assertEqual(1, len({request[2] for request in password_frames}))
+        self.assertEqual(credential, b"".join(request[10 : 10 + request[5]] for request in password_frames))
+        self.assertEqual(
+            [cli.OPCODE_AUTH_INFO, cli.OPCODE_PASSWORD_SET, cli.OPCODE_PASSWORD_SET, cli.OPCODE_PASSWORD_SET,
+             cli.OPCODE_AUTH_INFO, cli.OPCODE_AUTH_INFO, cli.OPCODE_AUTH_CHALLENGE, cli.OPCODE_AUTH_PROVE],
+            [opcode(wire) for wire in device.writes],
+        )
+
+    def test_password_set_requires_management_window_when_protected(self):
+        salt = b"0123456789abcdef"
+
+        def reply(device, wire):
+            request = wire[1:]
+            device.read_queue.append(
+                response(
+                    request,
+                    payload=auth_info_payload(
+                        configured=True, iterations=100000, salt=salt
+                    ),
+                    total=22,
+                )
+            )
+
+        client, device = self.make_client(reply, retries=0)
+        with self.assertRaises(cli.RemoteError) as ctx:
+            client.set_password("new")
+        self.assertEqual(cli.STATUS_AUTH_REQUIRED, ctx.exception.status)
+        self.assertEqual([cli.OPCODE_AUTH_INFO], [opcode(wire) for wire in device.writes])
+
+    def test_password_set_middle_timeout_restarts_from_zero_with_new_id(self):
+        salt = b"0123456789abcdef"
+        iterations = 100000
+        nonce = b"N" * 16
+        auth_info_count = 0
+        password_frames = []
+        timed_out = False
+        key = hashlib.pbkdf2_hmac("sha256", b"new", salt, iterations, dklen=32)
+
+        def reply(device, wire):
+            nonlocal auth_info_count, timed_out
+            request = wire[1:]
+            if request[1] == cli.OPCODE_AUTH_INFO:
+                auth_info_count += 1
+                configured = auth_info_count > 1
+                device.read_queue.append(
+                    response(
+                        request,
+                        payload=auth_info_payload(
+                            configured=configured,
+                            iterations=iterations if configured else 600000,
+                            salt=salt if configured else bytes(16),
+                        ),
+                        total=22,
+                    )
+                )
+            elif request[1] == cli.OPCODE_PASSWORD_SET:
+                password_frames.append(request)
+                offset = int.from_bytes(request[6:8], "little")
+                if offset == 22 and not timed_out:
+                    timed_out = True
+                    return
+                device.read_queue.append(response(request, offset=offset + request[5], total=52))
+            elif request[1] == cli.OPCODE_AUTH_CHALLENGE:
+                device.read_queue.append(response(request, payload=nonce, total=16))
+            elif request[1] == cli.OPCODE_AUTH_PROVE:
+                self.assertEqual(
+                    hmac.new(key, cli.AUTH_DOMAIN + nonce, hashlib.sha256).digest()[:16],
+                    request[10:26],
+                )
+                device.read_queue.append(empty_ack(request))
+
+        client, _ = self.make_client(reply, retries=1)
+        with mock.patch.object(cli.secrets, "token_bytes", return_value=salt):
+            client.set_password("new", iterations=iterations)
+        self.assertEqual(
+            [(1, 0), (1, 22), (2, 0), (2, 22), (2, 44)],
+            [(request[2], int.from_bytes(request[6:8], "little")) for request in password_frames],
+        )
+
+    def test_password_set_final_timeout_confirms_matching_salt_without_resend(self):
+        salt = b"0123456789abcdef"
+        iterations = 100000
+        nonce = b"N" * 16
+        auth_info_count = 0
+        password_frames = []
+        key = hashlib.pbkdf2_hmac("sha256", b"new", salt, iterations, dklen=32)
+
+        def reply(device, wire):
+            nonlocal auth_info_count
+            request = wire[1:]
+            if request[1] == cli.OPCODE_AUTH_INFO:
+                auth_info_count += 1
+                configured = auth_info_count > 1
+                device.read_queue.append(
+                    response(
+                        request,
+                        payload=auth_info_payload(
+                            configured=configured,
+                            iterations=iterations if configured else 600000,
+                            salt=salt if configured else bytes(16),
+                        ),
+                        total=22,
+                    )
+                )
+            elif request[1] == cli.OPCODE_PASSWORD_SET:
+                password_frames.append(request)
+                offset = int.from_bytes(request[6:8], "little")
+                if offset + request[5] == 52:
+                    return
+                device.read_queue.append(response(request, offset=offset + request[5], total=52))
+            elif request[1] == cli.OPCODE_AUTH_CHALLENGE:
+                device.read_queue.append(response(request, payload=nonce, total=16))
+            elif request[1] == cli.OPCODE_AUTH_PROVE:
+                self.assertEqual(
+                    hmac.new(key, cli.AUTH_DOMAIN + nonce, hashlib.sha256).digest()[:16],
+                    request[10:26],
+                )
+                device.read_queue.append(empty_ack(request))
+
+        client, _ = self.make_client(reply, retries=1)
+        with mock.patch.object(cli.secrets, "token_bytes", return_value=salt):
+            result = client.set_password("new", iterations=iterations)
+        self.assertTrue(result.authenticated)
+        self.assertEqual(3, len(password_frames))
+        self.assertEqual(1, len([frame for frame in password_frames if int.from_bytes(frame[6:8], "little") == 44]))
+
+    def test_password_set_final_timeout_with_old_salt_fails_without_resend(self):
+        new_salt = b"0123456789abcdef"
+        old_salt = b"fedcba9876543210"
+        auth_info_count = 0
+        password_frames = []
+
+        def reply(device, wire):
+            nonlocal auth_info_count
+            request = wire[1:]
+            if request[1] == cli.OPCODE_AUTH_INFO:
+                auth_info_count += 1
+                salt = bytes(16) if auth_info_count == 1 else old_salt
+                device.read_queue.append(
+                    response(
+                        request,
+                        payload=auth_info_payload(
+                            configured=auth_info_count > 1,
+                            iterations=100000 if auth_info_count > 1 else 600000,
+                            salt=salt,
+                        ),
+                        total=22,
+                    )
+                )
+            elif request[1] == cli.OPCODE_PASSWORD_SET:
+                password_frames.append(request)
+                offset = int.from_bytes(request[6:8], "little")
+                if offset + request[5] != 52:
+                    device.read_queue.append(response(request, offset=offset + request[5], total=52))
+
+        client, _ = self.make_client(reply, retries=1)
+        with mock.patch.object(cli.secrets, "token_bytes", return_value=new_salt), self.assertRaises(
+            cli.PasswordSetUnconfirmed
+        ):
+            client.set_password("new", iterations=100000)
+        self.assertEqual(3, len(password_frames))
+
+    def test_lock_retries_with_canonical_empty_ack(self):
+        calls = []
+
+        def reply(device, wire):
+            calls.append(wire[1:])
+            if len(calls) > 1:
+                device.read_queue.append(empty_ack(wire[1:]))
+
+        client, device = self.make_client(reply, retries=1)
+        client.lock()
+        self.assertEqual([cli.OPCODE_LOCK, cli.OPCODE_LOCK], [request[1] for request in calls])
+        self.assertEqual([0, 1], [request[2] for request in calls])
+        self.assertTrue(all(request[4] == 0xFF and request[5:10] == bytes(5) for request in calls))
+        self.assertEqual(2, len(device.writes))
+
+    def test_v1_bad_version_is_explicit_and_never_falls_back(self):
+        def reply(device, wire):
+            request = wire[1:]
+            device.read_queue.append(response(request, status=cli.STATUS_BAD_VERSION))
+
+        client, device = self.make_client(reply, retries=3)
+        with self.assertRaises(cli.LegacyFirmwareError) as ctx:
+            client.auth_info()
+        self.assertIn("v1", str(ctx.exception))
+        self.assertIn("不会自动回退", str(ctx.exception))
+        self.assertEqual(1, len(device.writes))
+
+
 class CliTests(unittest.TestCase):
     def test_cli_parses_decimal_and_hex_vid_pid(self):
         args = cli.make_parser().parse_args(
@@ -625,6 +1176,86 @@ class CliTests(unittest.TestCase):
     def test_cli_set_input_is_mutually_exclusive(self):
         with self.assertRaises(SystemExit):
             cli.make_parser().parse_args(["set", "0", "--text", "a", "--stdin"])
+
+    def test_cli_auth_info_reports_state_without_salt_or_secret(self):
+        def reply(device, wire):
+            request = wire[1:]
+            self.assertEqual(cli.OPCODE_AUTH_INFO, request[1])
+            device.read_queue.append(
+                response(
+                    request,
+                    payload=auth_info_payload(configured=False),
+                    total=cli.AUTH_INFO_SIZE,
+                )
+            )
+
+        device = FakeDevice(reply)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = cli.main(
+                ["auth-info"], hid_module=FakeHid([record()], device)
+            )
+        self.assertEqual(0, result)
+        self.assertEqual(
+            "state=OPEN authenticated=no iterations=600000\n", out.getvalue()
+        )
+        self.assertNotIn("salt", out.getvalue())
+
+    def test_cli_login_uses_getpass_and_does_not_print_password(self):
+        salt = b"0123456789abcdef"
+        nonce = b"N" * 16
+        key = hashlib.pbkdf2_hmac("sha256", b"password", salt, 100000, dklen=32)
+
+        def reply(device, wire):
+            request = wire[1:]
+            if request[1] == cli.OPCODE_AUTH_INFO:
+                device.read_queue.append(
+                    response(
+                        request,
+                        payload=auth_info_payload(
+                            configured=True, iterations=100000, salt=salt
+                        ),
+                        total=22,
+                    )
+                )
+            elif request[1] == cli.OPCODE_AUTH_CHALLENGE:
+                device.read_queue.append(response(request, payload=nonce, total=16))
+            elif request[1] == cli.OPCODE_AUTH_PROVE:
+                expected = hmac.new(
+                    key, cli.AUTH_DOMAIN + nonce, hashlib.sha256
+                ).digest()[:16]
+                self.assertEqual(expected, request[10:26])
+                device.read_queue.append(empty_ack(request))
+            else:
+                self.fail(f"unexpected opcode {request[1]}")
+
+        device = FakeDevice(reply)
+        out = io.StringIO()
+        with mock.patch.object(cli, "getpass", return_value="password"), contextlib.redirect_stdout(out):
+            result = cli.main(
+                ["login"], hid_module=FakeHid([record()], device)
+            )
+        self.assertEqual(0, result)
+        self.assertEqual("authenticated\n", out.getvalue())
+        self.assertNotIn("password", out.getvalue())
+
+    def test_cli_set_password_mismatch_or_empty_sends_no_hid_request(self):
+        for answers in (("new", "different"), ("", "")):
+            with self.subTest(answers=answers):
+                device = FakeDevice()
+                err = io.StringIO()
+                with mock.patch.object(cli, "getpass", side_effect=answers), contextlib.redirect_stderr(err):
+                    result = cli.main(
+                        ["set-password"],
+                        hid_module=FakeHid([record()], device),
+                    )
+                self.assertEqual(1, result)
+                self.assertEqual([], device.writes)
+                self.assertTrue(err.getvalue())
+
+    def test_cli_has_no_password_command_line_option(self):
+        with self.assertRaises(SystemExit):
+            cli.make_parser().parse_args(["login", "--password", "secret"])
 
     def test_cli_missing_hidapi_is_clear(self):
         # Exercise lazy import behavior without requiring hidapi to be

@@ -10,8 +10,8 @@ authentication contract.
 The protocol core receives complete frames and is called by one serialized work
 consumer; it does not create a thread, queue, or USB device.
 
-See [`CLI.md`](CLI.md) for the reference Python client's command-line and module APIs;
-the existing client has not yet been upgraded to v2 authentication.
+See [`CLI.md`](CLI.md) for the reference Python client's v2 command-line and
+module APIs, including authentication and protected management operations.
 
 ## Frame
 

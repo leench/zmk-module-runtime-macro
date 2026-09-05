@@ -13,14 +13,17 @@
 - 通过 ZMK 正常的 keycode event pipeline 发送按键，不直接构造键盘 HID report。
 - 单个 `k_work_delayable` 执行器；宏执行期间再次触发返回 `-EBUSY`，不会排队。
 - 可选的模块自有 USB HID 配置接口（默认使用 HID_1；如果已有模块占用，也可以改用其他 HID instance）。
-- Python `hidapi` 客户端，支持 `list`、`get`、`set` 和 `clear`。
+- Python `hidapi` 客户端，支持 v2 `auth-info`、`login`、`set-password`、`lock`、
+  `list`、`get`、`set` 和 `clear`。
 - 首次初始化时，为没有持久化值的 slot 设置默认内容 `Runtime Macro 1`、`Runtime Macro 2`……；已有值不会被覆盖，执行 `clear` 后也不会在重启时恢复默认值。
 
 不支持 Unicode、中文、Emoji、自动键盘布局转换或多个宏并发执行。
 
 ## 安全注意事项
 
-本模块没有针对敏感信息做任何安全方面的考量：USB HID 配置通道没有认证、授权或加密，能够访问设备 HID interface 的本机程序可以读取和修改 slots；slot 内容还可能持久化到设备 Flash/NVS，并在触发时作为键盘输入输出。因此不建议使用本模块保存或发送用户名、密码、OTP、令牌、密钥或其他敏感信息。请仅用于非敏感文本，并在不可信主机上禁用 `CONFIG_ZMK_RUNTIME_MACRO_USB_HID`。
+当前 USB HID 管理通道使用 v2 认证协议。新固件没有密码时处于 `OPEN`，可以一直不设置密码；设置非空密码后进入 `PROTECTED`，`LIST`、`GET`、`SET` 和 `CLEAR` 必须先通过 challenge-response 登录。协议没有清除密码的命令；忘记密码只能刷 settings-reset 固件，且该操作会清除包含宏 slot 和密码记录在内的 Settings 数据。
+
+认证不会加密 USB 流量，也不保护宏触发时作为键盘输入输出的文本。需要限制本机 HID 管理访问时请设置密码；不可信主机应禁用 `CONFIG_ZMK_RUNTIME_MACRO_USB_HID`。完整流程见 [`docs/CLI.md`](docs/CLI.md) 和 [`docs/AUTHENTICATION_PROTOCOL.md`](docs/AUTHENTICATION_PROTOCOL.md)。
 
 ## 加入 ZMK 构建
 
@@ -108,6 +111,12 @@ python3 -m pip install -r tools/requirements.txt
 常用命令：
 
 ```sh
+python3 tools/runtime_macro_cli.py auth-info
+# OPEN 设备可选：设置非空密码并重新认证。
+python3 tools/runtime_macro_cli.py set-password
+# PROTECTED 设备在管理命令前先登录。
+python3 tools/runtime_macro_cli.py login
+python3 tools/runtime_macro_cli.py lock
 python3 tools/runtime_macro_cli.py list
 python3 tools/runtime_macro_cli.py get 0
 python3 tools/runtime_macro_cli.py get 0 --raw > slot-0.txt
@@ -132,7 +141,7 @@ python3 tools/runtime_macro_cli.py --path "$HID_PATH" list
 - C API：[`include/zmk/runtime_macro.h`](include/zmk/runtime_macro.h)
 - protocol C API：[`include/zmk/runtime_macro_protocol.h`](include/zmk/runtime_macro_protocol.h)
 
-协议命令为 `LIST`、`GET`、`SET`、`CLEAR`。长文本使用 22-byte payload 分块；`SET` 在最后一块收到之前不会修改 slot。
+当前 v2 协议包含 `LIST`、`GET`、`SET`、`CLEAR`，以及 `AUTH_INFO`、`AUTH_CHALLENGE`、`AUTH_PROVE`、`PASSWORD_SET` 和 `LOCK`。长文本使用 22-byte payload 分块；`SET` 在最后一块收到之前不会修改 slot。密码凭据使用独立的 52-byte 分块 `PASSWORD_SET` 事务。
 
 ## 测试
 
@@ -148,7 +157,7 @@ Host 测试覆盖 slot/Settings、ASCII 映射、异步执行器、协议核心�
 
 ## 当前状态
 
-阶段 1–5 已完成并提交。阶段 6 已在一个兼容的 central 设备上验证 HID round trip、slot 读写和协议响应；实际按键输出、USB 重插、重启后的 NVS 保留以及其他 board/主机平台仍需验证。该状态不代表所有设备和平台均已通过。
+认证核心、v2 协议/USB 生命周期接入和参考 Python 客户端已经完成并提交。一个兼容的 central 设备已完成未经认证的 HID round trip、slot 读写检查；实体密码登录、USB 重插、重启后的 NVS 保留、实际按键输出以及其他 board/主机平台仍需验证。当前状态不声称实体 USB 认证已经验证，也不代表所有设备和平台均已通过。
 
 ## 隐私和公开仓库注意事项
 
@@ -162,4 +171,4 @@ Host 测试覆盖 slot/Settings、ASCII 映射、异步执行器、协议核心�
 
 ## 计划
 
-历史阶段和未完成项目见 [`docs/PLAN.md`](docs/PLAN.md)。后续可在保持 v1 wire protocol 兼容的前提下开发图形客户端；Unicode、ZMK Studio 新 RPC 和 ZMK 主仓库修改不在当前范围内。
+历史阶段和未完成项目见 [`docs/PLAN.md`](docs/PLAN.md)。后续图形或后台客户端应复用文档化的 v2 wire protocol 和认证流程；Unicode、ZMK Studio 新 RPC 和 ZMK 主仓库修改不在当前范围内。

@@ -1,6 +1,6 @@
 # Runtime Macro 密码认证协议（v2 设计契约）
 
-> **状态：固件已实现；桌面 GUI/CLI 尚未升级。**
+> **状态：固件和参考 Python CLI 已实现；桌面 GUI 尚未升级。**
 >
 > 本文是固件、桌面 GUI 和后台应用共同遵循的 v2 wire 契约。当前固件使用
 > [`PROTOCOL.md`](PROTOCOL.md) 所述 v2 frame，并拒绝 v1 的宏管理命令；客户端必须
@@ -303,7 +303,7 @@ payload[16..21]=0
 
 ### 7.4 `PASSWORD_SET (0x13)`
 
-`PASSWORD_SET` 使用与 `SET` 相同的严格分块事务模型，但逻辑对象固定为 52 bytes，`slot=0xff`：
+`PASSWORD_SET` 使用与 `SET` 相同的严格分块事务模型，但逻辑对象固定为 52 bytes，`slot=0xff`。该 wire object 不含 Settings 内部使用的 credential version byte；version 由固件的持久化格式处理：
 
 | Object offset | Size | Field |
 | ---: | ---: | --- |
@@ -340,7 +340,7 @@ offset=44, payload_length=8,  total_length=52
 如果最终 ACK 丢失，客户端不得盲目重复最后一个 chunk或整笔事务。应重新执行 `AUTH_INFO`：
 
 - salt 已变成新 salt：使用新密码认证；
-- salt 仍为旧 salt：使用旧密码认证后重试更换；
+- salt 仍为旧 salt：本次结果未确认，客户端报告失败，不得自动重发；用户确认设备状态后再显式重试；
 - 首次设置从 `OPEN` 变成 `PROTECTED`：使用新密码认证。
 
 ### 7.5 `LOCK (0x14)`
@@ -399,7 +399,7 @@ AUTH_PROVE(proof)
   -> RATE_LIMITED: 等待后重新从 AUTH_CHALLENGE 开始
 ```
 
-客户端不得重用 nonce 或 proof。传输超时后必须重新执行 `AUTH_CHALLENGE`，不能重发旧 `AUTH_PROVE`。
+客户端不得重用 nonce 或 proof。传输超时后必须重新执行 `AUTH_INFO` 和 `AUTH_CHALLENGE`，不能重发旧 `AUTH_PROVE`。
 
 ### 9.3 首次设置密码
 

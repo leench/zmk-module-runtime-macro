@@ -17,7 +17,8 @@ triggered. The module does not require changes to the ZMK main repository.
 - One delayable-work executor; a second trigger while a macro is running
   returns `-EBUSY` and is not queued.
 - Optional module-owned USB HID configuration interface on HID_1 by default; the device can be changed when another module already owns it.
-- Python `hidapi` client with `list`, `get`, `set`, and `clear` commands.
+- Python `hidapi` client with v2 `auth-info`, `login`, `set-password`, `lock`,
+  `list`, `get`, `set`, and `clear` commands.
 - On first initialization, slots without persisted values receive defaults such as
   `Runtime Macro 1` and `Runtime Macro 2`. Existing values are preserved, and a
   cleared slot remains empty after reboot.
@@ -27,13 +28,19 @@ macro queues are intentionally out of scope.
 
 ## Security notice
 
-This module makes no security considerations for sensitive information. The USB
-HID configuration channel has no authentication, authorization, or encryption;
-any local process that can access the HID interface may read or modify slots.
-Slot contents may also be persisted to device Flash/NVS and emitted as keyboard
-input when triggered. Do not use this module for usernames, passwords, OTPs,
-tokens, keys, or other sensitive information. Use it only for non-sensitive text
-and disable `CONFIG_ZMK_RUNTIME_MACRO_USB_HID` on untrusted hosts.
+The current USB HID management channel is the authenticated v2 protocol. A new
+credential leaves the device in `OPEN`, where management remains available
+without a password. After a non-empty password is configured, `LIST`, `GET`,
+`SET`, and `CLEAR` require a challenge-response login window. The protocol does
+not provide a command to clear a password; recovery requires a settings-reset
+firmware, which also clears Settings data such as macro slots.
+
+Authentication does not encrypt USB traffic and does not protect text emitted
+as keyboard input when a macro is triggered. Use the password mode when local
+HID access must be restricted, and keep the USB interface disabled on hosts that
+should have no management access. See [`docs/CLI.md`](docs/CLI.md) and
+[`docs/AUTHENTICATION_PROTOCOL.md`](docs/AUTHENTICATION_PROTOCOL.md) for the
+client flow and threat model.
 
 ## Add the module to a ZMK build
 
@@ -141,6 +148,12 @@ are documented in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
 Quick examples:
 
 ```sh
+python3 tools/runtime_macro_cli.py auth-info
+# Optional on an OPEN device; sets a non-empty password and re-authenticates.
+python3 tools/runtime_macro_cli.py set-password
+# Use login before management commands on a PROTECTED device.
+python3 tools/runtime_macro_cli.py login
+python3 tools/runtime_macro_cli.py lock
 python3 tools/runtime_macro_cli.py list
 python3 tools/runtime_macro_cli.py get 0
 python3 tools/runtime_macro_cli.py get 0 --raw > slot-0.txt
@@ -170,9 +183,11 @@ commit real paths, serial numbers, or host-specific device information.
 - Runtime macro C API: [`include/zmk/runtime_macro.h`](include/zmk/runtime_macro.h)
 - Protocol C API: [`include/zmk/runtime_macro_protocol.h`](include/zmk/runtime_macro_protocol.h)
 
-The protocol provides `LIST`, `GET`, `SET`, and `CLEAR`. Long text is sent in
-22-byte chunks; a slot is not changed until a complete `SET` transaction has
-been received.
+The current v2 protocol provides `LIST`, `GET`, `SET`, and `CLEAR`, plus
+`AUTH_INFO`, `AUTH_CHALLENGE`, `AUTH_PROVE`, `PASSWORD_SET`, and `LOCK`.
+Long macro text uses 22-byte chunks; a slot is not changed until a complete
+`SET` transaction has been received. Password credentials use the separate
+52-byte chunked `PASSWORD_SET` transaction.
 
 ## Tests
 
@@ -189,11 +204,14 @@ containerized Zephyr environment.
 
 ## Status
 
-Phases 1–5 are implemented and committed. Phase 6 has confirmed HID protocol
-round trips and slot read/write on one compatible central device. Physical key
-output, USB reconnect behavior, reboot/NVS retention, and portability across
-other boards and host backends still require validation on the target hardware.
-This status does not claim that every board or host platform has been tested.
+The authentication core, v2 protocol/USB lifecycle integration, and reference
+Python client are implemented and committed. One compatible central device has
+completed a real unauthenticated HID protocol round trip and slot read/write
+check. Physical password login, USB reconnect behavior, reboot/NVS retention,
+physical key output, and portability across other boards and host backends still
+require validation on target hardware. This status does not claim that physical
+USB authentication has been verified or that every board or host platform has
+been tested.
 
 ## Privacy
 
@@ -210,6 +228,6 @@ examples. Keep real hardware details in local test records only.
 ## Roadmap
 
 Historical phases and remaining work are listed in [`docs/PLAN.md`](docs/PLAN.md).
-A future graphical client may reuse the v1 wire protocol. Unicode, new ZMK
-Studio RPC messages, and ZMK main-repository changes remain outside the current
-scope.
+A future graphical or background client should reuse the documented v2 wire
+protocol and authentication flow. Unicode, new ZMK Studio RPC messages, and
+ZMK main-repository changes remain outside the current scope.

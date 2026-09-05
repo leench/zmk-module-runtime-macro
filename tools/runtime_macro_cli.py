@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import os
+import secrets
 import sys
 import time
+import unicodedata
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from getpass import getpass
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Self
@@ -17,8 +22,35 @@ from typing import Any, Self
 FRAME_SIZE = 32
 HEADER_SIZE = 10
 PAYLOAD_SIZE = 22
-VERSION = 1
+VERSION = 2
 LIST_SLOT = 0xFF
+
+# Authentication values mirror include/zmk/runtime_macro_auth.h and
+# include/zmk/runtime_macro_protocol.h.  The client derives the key; the
+# firmware only receives the 52-byte iterations/salt/key object.
+AUTH_CREDENTIAL_VERSION = 1
+AUTH_CREDENTIAL_STORAGE_SIZE = 53
+AUTH_KDF_ID = 1
+AUTH_ITERATIONS_DEFAULT = 600_000
+AUTH_ITERATIONS_MIN = 100_000
+AUTH_ITERATIONS_MAX = 5_000_000
+AUTH_SALT_SIZE = 16
+AUTH_KEY_SIZE = 32
+AUTH_NONCE_SIZE = 16
+AUTH_PROOF_SIZE = 16
+AUTH_INFO_SIZE = 22
+PASSWORD_CREDENTIAL_SIZE = 52
+PASSWORD_SET_LENGTH = PASSWORD_CREDENTIAL_SIZE
+AUTH_DOMAIN = b"ZMK-RUNTIME-MACRO-AUTH-V2"
+AUTH_FLAG_PASSWORD_CONFIGURED = 1 << 0
+AUTH_FLAG_SESSION_AUTHENTICATED = 1 << 1
+# Short aliases match the protocol document's flag names.
+AUTH_FLAGS_CONFIGURED = AUTH_FLAG_PASSWORD_CONFIGURED
+AUTH_FLAGS_SESSION = AUTH_FLAG_SESSION_AUTHENTICATED
+AUTH_FLAG_RESERVED_MASK = 0xFC
+AUTH_STATE_OPEN = 0
+AUTH_STATE_PROTECTED = 1
+AUTH_STATE_ERROR_LOCKED = 2
 
 VERSION_OFFSET = 0
 OPCODE_OFFSET = 1
@@ -34,6 +66,11 @@ OPCODE_LIST = 1
 OPCODE_GET = 2
 OPCODE_SET = 3
 OPCODE_CLEAR = 4
+OPCODE_AUTH_INFO = 0x10
+OPCODE_AUTH_CHALLENGE = 0x11
+OPCODE_AUTH_PROVE = 0x12
+OPCODE_PASSWORD_SET = 0x13
+OPCODE_LOCK = 0x14
 
 STATUS_OK = 0
 STATUS_BAD_VERSION = 1
@@ -45,6 +82,12 @@ STATUS_BAD_LENGTH = 6
 STATUS_INVALID_TEXT = 7
 STATUS_STORAGE_ERROR = 8
 STATUS_INTERNAL = 9
+STATUS_AUTH_REQUIRED = 10
+STATUS_AUTH_FAILED = 11
+STATUS_AUTH_NOT_CONFIGURED = 12
+STATUS_RATE_LIMITED = 13
+STATUS_AUTH_NO_CHALLENGE = 14
+STATUS_CREDENTIAL_INVALID = 15
 
 STATUS_NAMES = {
     STATUS_OK: "OK",
@@ -57,6 +100,12 @@ STATUS_NAMES = {
     STATUS_INVALID_TEXT: "INVALID_TEXT",
     STATUS_STORAGE_ERROR: "STORAGE_ERROR",
     STATUS_INTERNAL: "INTERNAL",
+    STATUS_AUTH_REQUIRED: "AUTH_REQUIRED",
+    STATUS_AUTH_FAILED: "AUTH_FAILED",
+    STATUS_AUTH_NOT_CONFIGURED: "AUTH_NOT_CONFIGURED",
+    STATUS_RATE_LIMITED: "RATE_LIMITED",
+    STATUS_AUTH_NO_CHALLENGE: "AUTH_NO_CHALLENGE",
+    STATUS_CREDENTIAL_INVALID: "CREDENTIAL_INVALID",
 }
 
 
@@ -85,6 +134,18 @@ class RemoteError(RuntimeMacroError):
         self.status = status
         name = STATUS_NAMES.get(status, f"UNKNOWN_STATUS_{status}")
         super().__init__(f"firmware returned {name} ({status})")
+
+
+class LegacyFirmwareError(RemoteError):
+    """The device rejected a v2 request, usually because it still runs v1."""
+
+    def __init__(self):
+        super().__init__(STATUS_BAD_VERSION)
+        self.args = ("固件仍是 v1 或不支持 v2 认证协议，请升级固件后再试；客户端不会自动回退到 v1",)
+
+
+class PasswordSetUnconfirmed(ProtocolError):
+    """The final PASSWORD_SET result could not be confirmed by its salt."""
 
 
 def u16(frame: bytes | bytearray, offset: int) -> int:
@@ -343,10 +404,87 @@ def validate_response(response: bytes, request: bytes) -> int:
     return payload_length
 
 
-@dataclass
+@dataclass(frozen=True)
 class SlotInfo:
     slot: int
     length: int
+
+
+@dataclass(frozen=True)
+class AuthInfo:
+    """Public v2 authentication metadata returned by ``AUTH_INFO``."""
+
+    configured: bool
+    authenticated: bool
+    iterations: int
+    salt: bytes
+
+    @property
+    def state(self) -> str:
+        return "PROTECTED" if self.configured else "OPEN"
+
+    @property
+    def protected(self) -> bool:
+        return self.configured
+
+    @property
+    def open(self) -> bool:
+        return not self.configured
+
+
+@dataclass(frozen=True)
+class _PasswordSetTimeout(Exception):
+    error: TransportError
+    final_chunk: bool
+
+    def __str__(self) -> str:
+        return str(self.error)
+
+
+def normalize_password(password: str) -> bytes:
+    """Normalize a user password exactly as required by the v2 contract."""
+    if not isinstance(password, str):
+        raise TypeError("password must be a string")
+    normalized = unicodedata.normalize("NFC", password)
+    password_bytes = normalized.encode("utf-8")
+    if not password_bytes:
+        raise ValueError("password must not be empty")
+    return password_bytes
+
+
+def validate_iterations(iterations: int) -> None:
+    if not isinstance(iterations, int) or not AUTH_ITERATIONS_MIN <= iterations <= AUTH_ITERATIONS_MAX:
+        raise ValueError(
+            f"iterations must be between {AUTH_ITERATIONS_MIN} and "
+            f"{AUTH_ITERATIONS_MAX}"
+        )
+
+
+def validate_auth_parameters(iterations: int, salt: bytes) -> None:
+    validate_iterations(iterations)
+    if len(salt) != AUTH_SALT_SIZE:
+        raise ValueError(f"salt must be exactly {AUTH_SALT_SIZE} bytes")
+    if not any(salt):
+        raise ValueError("salt must not be all zero")
+
+
+def derive_key(password: str, salt: bytes, iterations: int = AUTH_ITERATIONS_DEFAULT) -> bytes:
+    """Return the v2 PBKDF2-HMAC-SHA256 password key."""
+    password_bytes = normalize_password(password)
+    salt = bytes(salt)
+    validate_auth_parameters(iterations, salt)
+    return hashlib.pbkdf2_hmac(
+        "sha256", password_bytes, salt, iterations, dklen=AUTH_KEY_SIZE
+    )
+
+
+def build_auth_proof(key: bytes, nonce: bytes) -> bytes:
+    """Build the truncated v2 HMAC proof without retaining protocol state."""
+    if len(key) != AUTH_KEY_SIZE:
+        raise ValueError(f"key must be exactly {AUTH_KEY_SIZE} bytes")
+    if len(nonce) != AUTH_NONCE_SIZE:
+        raise ValueError(f"nonce must be exactly {AUTH_NONCE_SIZE} bytes")
+    return hmac.new(key, AUTH_DOMAIN + nonce, hashlib.sha256).digest()[:AUTH_PROOF_SIZE]
 
 
 class RuntimeMacroClient:
@@ -371,10 +509,16 @@ class RuntimeMacroClient:
 
     def _call(self, frame: bytes) -> bytes:
         response = self.transport.exchange(frame, self.timeout_ms)
-        validate_response(response, frame)
+        try:
+            validate_response(response, frame)
+        except RemoteError as exc:
+            if exc.status == STATUS_BAD_VERSION:
+                raise LegacyFirmwareError() from exc
+            raise
         return response
 
     def _call_with_timeout_retry(self, make_frame: Callable[[int], bytes]) -> bytes:
+        """Retry only a newly-built request after transport failure."""
         last: Exception | None = None
         for _ in range(self.retries + 1):
             request = make_frame(self._request_id())
@@ -388,6 +532,222 @@ class RuntimeMacroClient:
                 raise
         assert last is not None
         raise last
+
+    @staticmethod
+    def _validate_empty_ack(response: bytes, operation: str) -> None:
+        if (
+            response[PAYLOAD_LENGTH_OFFSET] != 0
+            or u16(response, OFFSET_OFFSET) != 0
+            or u16(response, TOTAL_LENGTH_OFFSET) != 0
+        ):
+            raise ProtocolError(f"{operation} acknowledgement is not empty")
+
+    @staticmethod
+    def _validate_chunk_ack(
+        response: bytes, operation: str, expected_offset: int, total: int
+    ) -> None:
+        if response[PAYLOAD_LENGTH_OFFSET] != 0:
+            raise ProtocolError(f"{operation} acknowledgement contains a payload")
+        if u16(response, OFFSET_OFFSET) != expected_offset:
+            raise ProtocolError(f"{operation} acknowledgement offset is incorrect")
+        if u16(response, TOTAL_LENGTH_OFFSET) != total:
+            raise ProtocolError(f"{operation} acknowledgement total length is incorrect")
+
+    def _auth_info_once(self) -> AuthInfo:
+        request = build_frame(OPCODE_AUTH_INFO, self._request_id(), LIST_SLOT)
+        response = self._call(request)
+        payload_length = response[PAYLOAD_LENGTH_OFFSET]
+        if (
+            payload_length != AUTH_INFO_SIZE
+            or u16(response, OFFSET_OFFSET) != 0
+            or u16(response, TOTAL_LENGTH_OFFSET) != AUTH_INFO_SIZE
+        ):
+            raise ProtocolError("AUTH_INFO response has invalid length or metadata")
+
+        payload = response[PAYLOAD_OFFSET : PAYLOAD_OFFSET + AUTH_INFO_SIZE]
+        flags = payload[0]
+        if flags & AUTH_FLAG_RESERVED_MASK:
+            raise ProtocolError("AUTH_INFO response contains reserved flags")
+        if payload[1] != AUTH_KDF_ID:
+            raise ProtocolError("AUTH_INFO response contains an unknown KDF")
+        iterations = int.from_bytes(payload[2:6], "little")
+        salt = bytes(payload[6:22])
+        configured = bool(flags & AUTH_FLAG_PASSWORD_CONFIGURED)
+        authenticated = bool(flags & AUTH_FLAG_SESSION_AUTHENTICATED)
+        if not configured:
+            if authenticated or iterations != AUTH_ITERATIONS_DEFAULT or any(salt):
+                raise ProtocolError("AUTH_INFO OPEN metadata is inconsistent")
+        else:
+            try:
+                validate_auth_parameters(iterations, salt)
+            except ValueError as exc:
+                raise ProtocolError(
+                    f"AUTH_INFO PROTECTED metadata is invalid: {exc}"
+                ) from exc
+        return AuthInfo(configured, authenticated, iterations, salt)
+
+    def auth_info(self) -> AuthInfo:
+        """Read and strictly validate the public v2 authentication metadata."""
+        return self._retry_call(self._auth_info_once)
+
+    def _retry_call(self, operation: Callable[[], Any]) -> Any:
+        """Retry an idempotent operation without reusing a request frame."""
+        last: Exception | None = None
+        for _ in range(self.retries + 1):
+            try:
+                return operation()
+            except TimeoutError as exc:
+                last = exc
+            except TransportError as exc:
+                last = exc
+        assert last is not None
+        raise last
+
+    def _auth_challenge_once(self) -> bytes:
+        request = build_frame(
+            OPCODE_AUTH_CHALLENGE, self._request_id(), LIST_SLOT
+        )
+        response = self._call(request)
+        payload_length = response[PAYLOAD_LENGTH_OFFSET]
+        if (
+            payload_length != AUTH_NONCE_SIZE
+            or u16(response, OFFSET_OFFSET) != 0
+            or u16(response, TOTAL_LENGTH_OFFSET) != AUTH_NONCE_SIZE
+        ):
+            raise ProtocolError("AUTH_CHALLENGE response has invalid length or metadata")
+        nonce = bytes(response[PAYLOAD_OFFSET : PAYLOAD_OFFSET + AUTH_NONCE_SIZE])
+        if not any(nonce):
+            raise ProtocolError("AUTH_CHALLENGE returned an all-zero nonce")
+        return nonce
+
+    def _auth_prove_once(self, proof: bytes) -> None:
+        request = build_frame(
+            OPCODE_AUTH_PROVE,
+            self._request_id(),
+            LIST_SLOT,
+            payload=proof,
+            total_length=AUTH_PROOF_SIZE,
+        )
+        response = self._call(request)
+        self._validate_empty_ack(response, "AUTH_PROVE")
+
+    def authenticate(self, password: str) -> AuthInfo:
+        """Authenticate with a fresh info/challenge/proof sequence.
+
+        A transport failure at any point starts a completely new sequence. In
+        particular, an AUTH_PROVE timeout never resends its old nonce or proof.
+        """
+        password_bytes = normalize_password(password)
+        last: Exception | None = None
+        for _ in range(self.retries + 1):
+            try:
+                info = self._auth_info_once()
+                if not info.configured:
+                    raise RemoteError(STATUS_AUTH_NOT_CONFIGURED)
+                nonce = self._auth_challenge_once()
+                key = hashlib.pbkdf2_hmac(
+                    "sha256",
+                    password_bytes,
+                    info.salt,
+                    info.iterations,
+                    dklen=AUTH_KEY_SIZE,
+                )
+                proof = build_auth_proof(key, nonce)
+                self._auth_prove_once(proof)
+                return AuthInfo(True, True, info.iterations, info.salt)
+            except TimeoutError as exc:
+                last = exc
+            except TransportError as exc:
+                last = exc
+        assert last is not None
+        raise last
+
+    def _password_set_once(self, credential: bytes, request_id: int) -> None:
+        for offset in range(0, len(credential), PAYLOAD_SIZE):
+            chunk = credential[offset : offset + PAYLOAD_SIZE]
+            final_chunk = offset + len(chunk) == len(credential)
+            request = build_frame(
+                OPCODE_PASSWORD_SET,
+                request_id,
+                LIST_SLOT,
+                payload=chunk,
+                offset=offset,
+                total_length=len(credential),
+            )
+            try:
+                response = self._call(request)
+            except (TimeoutError, TransportError) as exc:
+                raise _PasswordSetTimeout(exc, final_chunk) from exc
+            self._validate_chunk_ack(
+                response, "PASSWORD_SET", offset + len(chunk), len(credential)
+            )
+
+    def _confirm_password_set(self, salt: bytes, password: str) -> AuthInfo:
+        info = self.auth_info()
+        if (
+            not info.configured
+            or not hmac.compare_digest(info.salt, salt)
+        ):
+            raise PasswordSetUnconfirmed(
+                "PASSWORD_SET was not confirmed: device salt does not match"
+            )
+        return self.authenticate(password)
+
+    def set_password(
+        self,
+        new_password: str,
+        *,
+        iterations: int = AUTH_ITERATIONS_DEFAULT,
+    ) -> AuthInfo:
+        """Set or replace the password using one authenticated v2 transaction."""
+        password_bytes = normalize_password(new_password)
+        validate_iterations(iterations)
+        info = self.auth_info()
+        if info.configured and not info.authenticated:
+            raise RemoteError(STATUS_AUTH_REQUIRED)
+
+        salt = secrets.token_bytes(AUTH_SALT_SIZE)
+        validate_auth_parameters(iterations, salt)
+        key = hashlib.pbkdf2_hmac(
+            "sha256", password_bytes, salt, iterations, dklen=AUTH_KEY_SIZE
+        )
+        if not any(key):
+            raise ValueError("derived key must not be all zero")
+        credential = (
+            iterations.to_bytes(4, "little") + salt + key
+        )
+
+        last: Exception | None = None
+        for attempt in range(self.retries + 1):
+            request_id = self._request_id()
+            try:
+                self._password_set_once(credential, request_id)
+                return self._confirm_password_set(salt, new_password)
+            except _PasswordSetTimeout as exc:
+                if exc.final_chunk:
+                    # The final write may already have committed. Never resend
+                    # it blindly; compare the public salt instead.
+                    return self._confirm_password_set(salt, new_password)
+                last = exc.error
+                if attempt == self.retries:
+                    raise last
+            except RemoteError as exc:
+                if exc.status not in (STATUS_BAD_REQUEST, STATUS_BAD_OFFSET):
+                    raise
+                last = exc
+                if attempt == self.retries:
+                    raise
+        assert last is not None
+        raise last
+
+    def lock(self) -> None:
+        """Close the current management session and discard protocol staging."""
+        def do_lock() -> None:
+            request = build_frame(OPCODE_LOCK, self._request_id(), LIST_SLOT)
+            response = self._call(request)
+            self._validate_empty_ack(response, "LOCK")
+
+        self._retry_call(do_lock)
 
     def list_slots(self) -> list[SlotInfo]:
         offset = 0
@@ -527,6 +887,8 @@ class RuntimeMacroClient:
                 return
             except TimeoutError as exc:
                 last = exc
+            except TransportError as exc:
+                last = exc
         assert last is not None
         raise last
 
@@ -561,6 +923,10 @@ def make_parser() -> argparse.ArgumentParser:
     inputs.add_argument("--stdin", action="store_true")
     clear = sub.add_parser("clear")
     clear.add_argument("slot", type=int)
+    sub.add_parser("auth-info", help="show OPEN/PROTECTED status")
+    sub.add_parser("login", help="authenticate with the configured password")
+    sub.add_parser("set-password", help="set or replace the management password")
+    sub.add_parser("lock", help="close the current management session")
     return parser
 
 
@@ -610,6 +976,17 @@ def _read_set_data(args: argparse.Namespace) -> bytes:
     return data
 
 
+def _read_password(*, confirm: bool = False) -> str:
+    password = getpass("Password: ")
+    normalized = normalize_password(password)
+    if confirm:
+        repeated = getpass("Confirm password: ")
+        repeated_normalized = normalize_password(repeated)
+        if normalized != repeated_normalized:
+            raise ValueError("password entries do not match")
+    return password
+
+
 def main(argv: list[str] | None = None, *, hid_module: Any = None) -> int:
     parser = make_parser()
     args = parser.parse_args(argv)
@@ -620,10 +997,22 @@ def main(argv: list[str] | None = None, *, hid_module: Any = None) -> int:
             data = _read_set_data(args)
         else:
             data = None
+
+        # Passwords are deliberately collected before opening HID. They never
+        # appear in argv, environment variables, ordinary files, or logs, and
+        # invalid confirmation never sends a HID request.
+        password = None
+        if args.command == "login":
+            password = _read_password()
+        elif args.command == "set-password":
+            password = _read_password(confirm=True)
+
         module = hid_module if hid_module is not None else _load_hid()
         transport = open_transport(module, path=args.path, vid=args.vid, pid=args.pid)
         with transport:
-            client = RuntimeMacroClient(transport, timeout_ms=args.timeout_ms, retries=args.retries)
+            client = RuntimeMacroClient(
+                transport, timeout_ms=args.timeout_ms, retries=args.retries
+            )
             if args.command == "list":
                 for item in client.list_slots():
                     print(f"{item.slot}\t{item.length}")
@@ -641,6 +1030,24 @@ def main(argv: list[str] | None = None, *, hid_module: Any = None) -> int:
             elif args.command == "clear":
                 client.clear_slot(args.slot)
                 print(f"slot {args.slot} cleared")
+            elif args.command == "auth-info":
+                info = client.auth_info()
+                session = "yes" if info.authenticated else "no"
+                print(
+                    f"state={info.state} authenticated={session} "
+                    f"iterations={info.iterations}"
+                )
+            elif args.command == "login":
+                assert password is not None
+                client.authenticate(password)
+                print("authenticated")
+            elif args.command == "set-password":
+                assert password is not None
+                client.set_password(password)
+                print("password configured")
+            elif args.command == "lock":
+                client.lock()
+                print("locked")
         return 0
     except (RuntimeMacroError, ValueError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
