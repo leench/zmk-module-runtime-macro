@@ -21,8 +21,10 @@ if (CONFIG_ZMK_BEHAVIOR_RUNTIME_MACRO
 
   if (CONFIG_ZMK_RUNTIME_MACRO_USB_HID)
     zephyr_library_sources(
+      src/runtime_macro_auth.c
       src/runtime_macro_protocol.c
       src/runtime_macro_usb_hid.c
     )
+    zephyr_library_link_libraries(mbedTLS)
   endif()
 endif() # CONFIG_ZMK_BEHAVIOR_RUNTIME_MACRO AND (unibody OR split central)

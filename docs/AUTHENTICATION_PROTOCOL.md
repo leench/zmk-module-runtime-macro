@@ -72,7 +72,7 @@ settings reset 通常还会清除 Runtime Macro slots、蓝牙配对和其他 ZM
 - 未完成的 `SET` staging；
 - 未完成的 `PASSWORD_SET` staging。
 
-这些状态不得写入 Settings。重启、USB disconnect/reset、显式 `LOCK`、密码成功变更或持久认证状态变化时必须清除。认证窗口过期时也必须清除所有 staging。
+这些状态不得写入 Settings。认证窗口过期时必须清除所有 staging。重启、USB disconnect/reset、认证成功、密码成功变更或 Settings 凭据重新加载时，清除认证窗口、challenge、失败计数/限速和所有 staging。显式 `LOCK` 只清除认证窗口、challenge 和所有 staging，保留失败计数及 cooldown，防止未认证客户端通过反复 `LOCK` 绕过限速。
 
 默认认证窗口为最后一次成功受保护管理操作后的 5 分钟。实现阶段应提供 Kconfig 调整项；`AUTH_INFO` 不延长窗口。challenge 默认 30 秒过期，并且最多用于一次 `AUTH_PROVE` 尝试。
 
@@ -145,7 +145,7 @@ ASCII domain 字符串不包含结尾 NUL；`||` 表示直接拼接。wire 中�
 cooldown_seconds = min(2^(n - 1), 8)
 ```
 
-限速期内的 `AUTH_CHALLENGE` 返回 `RATE_LIMITED`，不生成 nonce。认证成功、重启或 USB reset 后连续失败计数归零。客户端收到 `RATE_LIMITED` 后应等待，不得高频轮询；无法获知其他客户端造成的失败计数时至少等待 8 秒再重试。
+限速期内的 `AUTH_CHALLENGE` 返回 `RATE_LIMITED`，不生成 nonce。认证成功、重启或 USB disconnect/reset（transport reset）后连续失败计数及 cooldown 归零；显式 `LOCK` 不清除它们。客户端收到 `RATE_LIMITED` 后应等待，不得高频轮询；无法获知其他客户端造成的失败计数时至少等待 8 秒再重试。
 
 该限速只减少在线猜测，不阻止攻击者利用公开 salt、nonce 和 proof 进行离线字典攻击。
 
@@ -251,6 +251,8 @@ payload 全零
 
 `OPEN` 时 flags 为 `0`、salt 全零、iterations 返回新密码推荐默认值 `600000`。`PROTECTED` 时返回实际保存的 iterations 和 salt。`AUTH_INFO` 不返回 `K`，也不延长认证窗口。
 
+如果持久化凭据存在但无法校验，固件处于 `ERROR_LOCKED`：`AUTH_INFO` 必须返回 `CREDENTIAL_INVALID`，并使用错误 response 的全零 payload（`payload_length=0`、`offset=0`、`total_length=0`）。不得将其表现为成功的 `OPEN`，也不得泄露损坏凭据的 metadata。
+
 ### 7.2 `AUTH_CHALLENGE (0x11)`
 
 Request 与 `AUTH_INFO` 的空 request 约束相同。
@@ -342,6 +344,7 @@ Request 与 `AUTH_INFO` 的空 request 约束相同。`LOCK` 始终允许且幂�
 - 清除认证窗口；
 - 清除 challenge；
 - 清除所有 `SET/PASSWORD_SET` staging；
+- 保留连续失败计数和 cooldown，不能借此绕过认证限速；
 - 不改变持久凭据或宏内容。
 
 成功 response 无 payload。
@@ -472,7 +475,7 @@ OS credential store 只能在设备确认新凭据已经生效后更新。最终
 - 正确、错误、重复、过期和缺失 challenge；
 - constant-time proof 比较路径；
 - 限速不阻塞协议 worker；
-- 认证 timeout、`LOCK`、USB disconnect/reset、重启清理；
+- 认证 timeout、`LOCK`、USB disconnect/reset、重启的 session/challenge/staging 清理，以及 `LOCK` 保留失败限速、transport reset/认证成功清除失败限速；
 - `SET/PASSWORD_SET` staging 在所有失效边界正确丢弃；
 - `PASSWORD_SET` Settings 失败时旧凭据仍可用；
 - 密码变更成功后旧凭据和旧会话立即失效；

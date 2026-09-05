@@ -52,6 +52,11 @@ config ZMK_RUNTIME_MACRO_USB_HID
     depends on ZMK_USB
     depends on USB_DEVICE_STACK
     depends on (!ZMK_SPLIT || ZMK_SPLIT_ROLE_CENTRAL)
+    depends on CSPRNG_AVAILABLE
+    select ENTROPY_GENERATOR
+    select MBEDTLS
+    select MBEDTLS_MD
+    select MBEDTLS_SHA256
     help
       Expose the runtime macro protocol through a dedicated legacy USB HID
       interface. The transport is central-side only and keeps the ZMK keyboard
@@ -69,6 +74,26 @@ config ZMK_RUNTIME_MACRO_USB_HID_DEVICE
       is the default. If another module already owns HID_1, increase
       USB_HID_DEVICE_COUNT and assign this transport to a different unused
       instance, such as HID_2.
+
+if ZMK_RUNTIME_MACRO_USB_HID
+
+config ZMK_RUNTIME_MACRO_AUTH_CHALLENGE_TIMEOUT
+    int "Runtime macro authentication challenge timeout (seconds)"
+    default 30
+    range 1 300
+    help
+      Lifetime of an unconsumed authentication challenge. A challenge is
+      single-use and expires after this many seconds.
+
+config ZMK_RUNTIME_MACRO_AUTH_SESSION_TIMEOUT
+    int "Runtime macro authentication session inactivity timeout (seconds)"
+    default 300
+    range 1 86400
+    help
+      Inactivity timeout for an authenticated management session. Successful
+      management operations may refresh this window.
+
+endif # ZMK_RUNTIME_MACRO_USB_HID
 
 endif # ZMK_BEHAVIOR_RUNTIME_MACRO
 

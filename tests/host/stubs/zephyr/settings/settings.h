@@ -30,7 +30,7 @@ static inline bool settings_name_steq(const char *name, const char *key, const c
         return false;
     }
 
-    while (*key != '\0' && *name != '\0' && *name != '=' && *key == *name) {
+    while (*key != '\0' && *name != '\0' && *name != '/' && *name != '=' && *key == *name) {
         key++;
         name++;
     }

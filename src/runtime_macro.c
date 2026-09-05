@@ -15,6 +15,10 @@
 
 #include <zmk/runtime_macro.h>
 
+#if defined(CONFIG_ZMK_RUNTIME_MACRO_USB_HID)
+#include "runtime_macro_auth_internal.h"
+#endif
+
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 static char runtime_macro_slots[CONFIG_ZMK_RUNTIME_MACRO_SLOT_COUNT]
@@ -210,6 +214,13 @@ static int runtime_macro_settings_set(const char *name, size_t length, settings_
         return -ENOENT;
     }
 
+#if defined(CONFIG_ZMK_RUNTIME_MACRO_USB_HID)
+    int auth_err = zmk_runtime_macro_auth_settings_set(name, length, read_cb, cb_arg);
+    if (auth_err != -ENOENT) {
+        return auth_err;
+    }
+#endif
+
     if (settings_name_steq(name, RUNTIME_MACRO_DEFAULTS_SETTING_NAME, &next)) {
         if (next != NULL || length != sizeof(uint8_t) || read_cb == NULL) {
             return -EINVAL;
@@ -267,6 +278,10 @@ static int runtime_macro_settings_set(const char *name, size_t length, settings_
 }
 
 static int runtime_macro_settings_commit(void) {
+#if defined(CONFIG_ZMK_RUNTIME_MACRO_USB_HID)
+    (void)zmk_runtime_macro_auth_settings_commit();
+#endif
+
     if (runtime_macro_defaults_initialized) {
         return 0;
     }
