@@ -1,10 +1,11 @@
 # ZMK Runtime Macro
 
-[中文说明](README.zh-CN.md)
+[简体中文](README.zh-CN.md) · [Desktop application](https://github.com/leench/zmk-runtime-macro-desktop)
 
 A Zephyr/ZMK external module that stores ASCII text in runtime macro slots and
 emits the text as keyboard events when a `&runtime_macro <slot>` behavior is
-triggered. The module does not require changes to the ZMK main repository.
+triggered. The module does not require changes to the ZMK main repository. For a desktop
+management application, see [zmk-runtime-macro-desktop](https://github.com/leench/zmk-runtime-macro-desktop).
 
 ## Features
 

@@ -1,9 +1,10 @@
 # ZMK Runtime Macro
 
-[English README](README.md)
+[English README](README.md) · [桌面应用](https://github.com/leench/zmk-runtime-macro-desktop)
 
 一个不修改 ZMK 主仓库的 Zephyr/ZMK external module：通过
-`&runtime_macro <slot>` 触发保存于 Settings/NVS 的 ASCII 文本，并将文本按键盘事件逐字符发送。
+`&runtime_macro <slot>` 触发保存于 Settings/NVS 的 ASCII 文本，并将文本按键盘事件逐字符发送。桌面管理应用见
+[zmk-runtime-macro-desktop](https://github.com/leench/zmk-runtime-macro-desktop)。
 
 ## 功能
 
