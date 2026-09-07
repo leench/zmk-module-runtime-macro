@@ -66,6 +66,16 @@ config ZMK_RUNTIME_MACRO_USB_HID
       that option applies to every HID instance, including ZMK's keyboard
       HID_0.
 
+config ZMK_RUNTIME_MACRO_DYNAMIC
+    bool "Runtime Macro dynamic macro support"
+    default n
+    depends on ZMK_RUNTIME_MACRO_USB_HID
+    help
+      Enable the RAM-only dynamic macro feature. This option is forced off
+      when the management USB HID transport is disabled; it does not select
+      or enable the USB transport. The dynamic macro source is central-side
+      only and remains disabled by default during the initial rollout.
+
 config ZMK_RUNTIME_MACRO_USB_HID_DEVICE
     string "Runtime Macro USB HID device"
     default "HID_1"

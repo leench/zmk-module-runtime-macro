@@ -12,7 +12,9 @@ and schedule/error recovery. The protocol test covers fixed wire constants,
 LIST/GET chunking, atomic SET staging, duplicate/restart recovery, malformed
 frames, and storage errors. USB transport tests use host HID/device stubs to
 verify descriptor bytes, callback queueing, work scheduling, IN endpoint
-throttling, and initialization failures without requiring a USB device.
+throttling, and initialization failures without requiring a USB device. The
+dynamic gate test checks the phase-1 fixed 256-byte layout skeleton without
+exercising any dynamic state transitions.
 
 A full ZMK/native_sim test is still needed for end-to-end Settings/NVS
 persistence on a target configuration; the host tests are intentionally limited

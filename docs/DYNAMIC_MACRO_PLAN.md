@@ -263,6 +263,56 @@ ZMK 当前可用事件边界：
 - 剩余 RAM 不能覆盖运行期安全余量；
 - 仅引用动态 behavior 的 Kconfig/DTS 关系无法形成确定行为。
 
+### 6.6 Phase 1 实际完成记录
+
+Phase 1 已完成。实现和验证结果如下；本阶段没有进入 RAM store、TTL、协议、DTS behavior、executor 或 client 实现。
+
+#### Gate 与骨架
+
+- 新增 `CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC`，默认 `n`，并依赖
+  `CONFIG_ZMK_RUNTIME_MACRO_USB_HID`；dynamic 不反向 `select` 或启用 USB。
+- USB transport 关闭时，显式请求 dynamic `y` 会收到 Kconfig unmet-dependency
+  warning，最终解析为 `n`；不编译 dynamic source，也不分配 dynamic buffer。
+- CMake 仅在 central-side runtime macro library 中加入
+  `src/runtime_macro_dynamic.c`；feature off 时没有 dynamic object。
+- feature on 只保留两个 256-byte RAM layout skeleton buffer 和 compile-time
+  assertions。当前没有状态转换、锁、TTL 或数据路径。
+- 由于本阶段不增加 dynamic DTS behavior，骨架仍位于现有 central runtime
+  macro library 的 gate 内；dynamic-only keymap 的 behavior 选择与 DTS/Kconfig
+  衔接留到后续 behavior 阶段处理，不在本阶段静默扩展范围。
+
+#### 验证命令
+
+- 在 `zmk-dev` devcontainer 内运行 `CLANG=gcc ./tests/host/run.sh`：GCC、
+  sanitizer 及替代 Clang 阶段全部通过。
+- split central、Totem dongle off/on、split peripheral USB-off 和
+  `native_sim` unibody 构建均通过；各 build 使用独立目录。
+- `git diff --check`：通过。
+
+#### 当前构建与 RAM/Flash 记录
+
+| 构建场景 | Dynamic 最终值 | Flash | RAM | 剩余 RAM | Dynamic map |
+|---|---:|---:|---:|---:|---|
+| `leen_temper_dongle` split central off | `n` | 344316 B | 92602 B | 169542 B | absent |
+| `leen_temper_dongle` split central on | `y` | 344332 B | 93114 B | 169030 B | `.bss.runtime_macro_dynamic_state = 0x200` |
+| `leen_totem_dongle` off | `n` | 429568 B | 193278 B | 68866 B | absent |
+| `leen_totem_dongle` on | `y` | 429584 B | 193790 B | 68354 B | `.bss.runtime_macro_dynamic_state = 0x200` |
+| split peripheral，USB off | `n` | 190692 B | 36516 B | 225628 B | absent |
+| `native_sim` unibody，USB off | `n` | — | — | — | absent |
+
+当前 Totem dongle 实测增量为 Flash `+16 B`、RAM `+512 B`，与两个 256-byte
+骨架 buffer 一致。历史 `260478/262144` RAM 数值仅作为旧配置参考，不作为当前
+门禁；当前容器和 display 配置的实测值是 `193278/262144`（off）和
+`193790/262144`（on）。两次 Totem build 均链接成功，未触发 Phase 1 停止条件。
+
+#### 阶段边界与后续衔接
+
+本阶段提交的文件为：`Kconfig`、`CMakeLists.txt`、
+`src/runtime_macro_dynamic.c`、`src/runtime_macro_dynamic_internal.h`、
+`tests/host/run.sh`、`tests/host/runtime_macro_dynamic_gate_test.c` 和
+`tests/host/README.md`。下一阶段只可在用户确认后实现 RAM store、staging、
+原子 commit、clear 和 TTL；不得把本阶段的 layout skeleton 当作可用动态宏数据路径。
+
 ---
 
 ## 7. 阶段 2：RAM store、上传 staging 与 TTL

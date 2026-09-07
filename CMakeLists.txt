@@ -19,6 +19,10 @@ if (CONFIG_ZMK_BEHAVIOR_RUNTIME_MACRO
     src/behaviors/behavior_runtime_macro.c
   )
 
+  if (CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC)
+    zephyr_library_sources(src/runtime_macro_dynamic.c)
+  endif()
+
   if (CONFIG_ZMK_RUNTIME_MACRO_USB_HID)
     zephyr_library_sources(
       src/runtime_macro_auth.c
