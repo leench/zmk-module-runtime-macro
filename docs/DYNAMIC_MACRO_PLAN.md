@@ -389,6 +389,69 @@ API 只供本模块的 protocol、behavior、executor 和 lifecycle 使用，放
 - 并发和 TTL 状态转换有注释且与 contract 一致；
 - feature on/off build 和 RAM 记录更新。
 
+### 7.7 Phase 2 实际完成记录
+
+Phase 2 已完成。动态 store 仍完全独立于 Settings/NVS、USB protocol、DTS
+behavior 和 executor；staging inactivity timeout 留给后续 protocol transaction
+层，不在本阶段伪造第二套生命周期状态。
+
+#### 私有 API 与状态语义
+
+`src/runtime_macro_dynamic_internal.h` 新增了后续 protocol 可直接使用的私有
+API：
+
+- `zmk_runtime_macro_dynamic_reset()`：清空所有 volatile state 并取消 TTL work；
+- `zmk_runtime_macro_dynamic_begin()`：校验 `1..256` 长度和 `1..86400` TTL，合法
+  BEGIN 替换旧 staging 但保留 committed；
+- `zmk_runtime_macro_dynamic_append()`：只接受 contiguous offset 和合法 ASCII/control
+  字节，最终 chunk 在同一 mutex 临界区内完成 committed 原子替换并启动 TTL；
+- `zmk_runtime_macro_dynamic_cancel_staging()`：只清 staging；
+- `zmk_runtime_macro_dynamic_clear()`：幂等清 committed、staging 和 TTL；
+- `zmk_runtime_macro_dynamic_check_expiry()`：供后续 lifecycle/consumer 在观察状态
+  前执行 deadline 检查。
+
+状态包含两个 256-byte buffer、长度/active 标志、staging TTL、TTL deadline、
+current/work generation、一个 mutex 和一个 delayable work。错误的 BEGIN/DATA
+输入会 zeroize/cancel staging，同时保留尚未过期的旧 committed。TTL 到期会清除
+committed、staging、transaction metadata 和 TTL；recommit 使用 deadline 与
+`generation` 保护，旧 work 不会清除较新的 commit。数据和日志不包含文本内容。
+
+本阶段没有增加动态 read/get API，也没有实现 executor handoff/consume/snapshot；
+下一阶段必须在同一 executor 中补充这些语义，并继续保持 TTL deadline/generation
+保护。staging inactivity timeout 仍由后续 protocol transaction 层负责，不能在
+两个模块中产生相互独立的 transaction 真值。
+
+#### 测试与构建记录
+
+- 新增独立 `runtime_macro_dynamic_store_test.c`，覆盖长度边界、完整合法字符集、
+  非法字节、chunk/offset 错误、旧 committed 保留、BEGIN 替换 staging、原子 final
+  commit、clear/zeroize、默认/显式 TTL、generation/deadline race，以及 clear 与
+  final append 的 pthread 锁竞态。
+- 在 `zmk-dev` devcontainer 内运行 `CLANG=gcc ./tests/host/run.sh`：GCC、sanitizer、
+  替代 Clang 阶段和既有 static/protocol/auth/executor tests 全部通过。
+- dynamic object 未解析 `settings_*` 或 static slot API；feature-off map 无 dynamic
+  state；`git diff --check` 通过。
+
+当前 Totem dongle（`leen_display raw_hid_adapter leen_totem_dongle`）实测：
+
+| 构建 | Flash | RAM | Dynamic state map |
+|---|---:|---:|---|
+| Phase 2 off | 429568 B | 193278 B / 262144 B（73.73%） | absent |
+| Phase 2 on | 430116 B | 193894 B / 262144 B（73.96%） | `.bss.runtime_macro_dynamic_state = 0x228` |
+
+相对 Phase 2 off，当前 dynamic on 总增量为 Flash `+548 B`、RAM `+616 B`，剩余
+RAM 为 `68250 B`。其中 Phase 1 已有两个 256-byte buffer；Phase 2 主要增加状态、
+mutex/work 和 store 代码。两次 build 均成功链接，仅有既有 `leen-display`
+`ZMK_TRANSPORT_NONE` warning，未触发阶段停止条件。
+
+#### 阶段边界与后续衔接
+
+本阶段修改文件为：`src/runtime_macro_dynamic.c`、
+`src/runtime_macro_dynamic_internal.h`、`tests/host/stubs/zephyr/kernel.h`、
+`tests/host/run.sh` 和 `tests/host/runtime_macro_dynamic_store_test.c`。下一阶段
+只可在用户确认后改造现有 executor，加入共享 busy、256-byte snapshot、consume-on-
+accept 和失败保留语义；不得新增 dynamic 专用 worker 或第二个长期文本 buffer。
+
 ---
 
 ## 8. 阶段 3：共用执行器与消费语义

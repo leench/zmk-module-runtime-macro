@@ -161,6 +161,11 @@ static inline int k_work_reschedule(struct k_work_delayable *work,
   return host_work_schedule(work, delay, true);
 }
 
+static inline int k_work_cancel_delayable(struct k_work_delayable *work) {
+  work->scheduled = false;
+  return 0;
+}
+
 extern int64_t host_uptime;
 static inline int64_t k_uptime_get(void) { return host_uptime; }
 
