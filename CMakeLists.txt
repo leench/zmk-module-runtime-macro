@@ -19,6 +19,12 @@ if (CONFIG_ZMK_BEHAVIOR_RUNTIME_MACRO
     src/behaviors/behavior_runtime_macro.c
   )
 
+  zephyr_library_sources(src/runtime_macro_dynamic_guard.c)
+
+  if (CONFIG_ZMK_BEHAVIOR_RUNTIME_MACRO_DYNAMIC)
+    zephyr_library_sources(src/behaviors/behavior_runtime_macro_dynamic.c)
+  endif()
+
   if (CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC)
     zephyr_library_sources(src/runtime_macro_dynamic.c)
   endif()
@@ -32,3 +38,15 @@ if (CONFIG_ZMK_BEHAVIOR_RUNTIME_MACRO
     zephyr_library_link_libraries(mbedTLS)
   endif()
 endif() # CONFIG_ZMK_BEHAVIOR_RUNTIME_MACRO AND (unibody OR split central)
+
+# Keep the unsupported dynamic reference check active on split peripherals,
+# without pulling in any dynamic store, executor, or behavior implementation.
+if (CONFIG_ZMK_BEHAVIOR_RUNTIME_MACRO
+    AND CONFIG_ZMK_SPLIT AND NOT CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+  zephyr_library()
+  zephyr_library_include_directories(
+    include
+    ${APPLICATION_SOURCE_DIR}/include
+  )
+  zephyr_library_sources(src/runtime_macro_dynamic_guard.c)
+endif()

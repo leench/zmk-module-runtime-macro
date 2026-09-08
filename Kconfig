@@ -4,11 +4,12 @@
 config ZMK_BEHAVIOR_RUNTIME_MACRO
     bool "Runtime Macro behavior"
     default y
-    depends on DT_HAS_ZMK_BEHAVIOR_RUNTIME_MACRO_ENABLED
+    depends on DT_HAS_ZMK_BEHAVIOR_RUNTIME_MACRO_ENABLED || DT_HAS_ZMK_BEHAVIOR_RUNTIME_MACRO_DYNAMIC_ENABLED
     depends on SETTINGS
     help
-      Enable the runtime_macro behavior that triggers the US ASCII text stored
-      in one of the fixed macro slots (&runtime_macro <slot>).
+      Enable the runtime macro module. The module provides the static
+      runtime_macro behavior and/or the RAM-only runtime_macro_dynamic
+      behavior, depending on the referenced devicetree nodes.
 
 if ZMK_BEHAVIOR_RUNTIME_MACRO
 
@@ -71,10 +72,23 @@ config ZMK_RUNTIME_MACRO_DYNAMIC
     default n
     depends on ZMK_RUNTIME_MACRO_USB_HID
     help
-      Enable the RAM-only dynamic macro feature. This option is forced off
-      when the management USB HID transport is disabled; it does not select
-      or enable the USB transport. The dynamic macro source is central-side
-      only and remains disabled by default during the initial rollout.
+      Enable the RAM-only dynamic macro feature. This option is explicit opt-in
+      and remains disabled unless selected by the application configuration. It
+      is forced off when the management USB HID transport is disabled; it does
+      not select or enable the USB transport. The dynamic macro source is
+      central-side only.
+
+config ZMK_BEHAVIOR_RUNTIME_MACRO_DYNAMIC
+    bool "Runtime Macro dynamic behavior"
+    default y
+    depends on DT_HAS_ZMK_BEHAVIOR_RUNTIME_MACRO_DYNAMIC_ENABLED
+    depends on ZMK_RUNTIME_MACRO_DYNAMIC
+    depends on (!ZMK_SPLIT || ZMK_SPLIT_ROLE_CENTRAL)
+    help
+      Enable the zero-parameter, central-only behavior that executes the
+      RAM-only dynamic macro object. The parent dynamic feature remains an
+      explicit application opt-in; this behavior defaults on only when that
+      feature is enabled and the node is referenced.
 
 config ZMK_RUNTIME_MACRO_USB_HID_DEVICE
     string "Runtime Macro USB HID device"

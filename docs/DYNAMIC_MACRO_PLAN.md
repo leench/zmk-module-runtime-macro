@@ -599,6 +599,56 @@ protocol、USB 或 lifecycle。
 - 无协议执行 opcode；
 - 静态 `&runtime_macro <slot>` metadata 和参数范围无变化。
 
+### 9.6 Phase 4 实际完成记录
+
+Phase 4 已完成。新增了 zero-parameter、central-only 的
+`&runtime_macro_dynamic` behavior；press 只调用现有
+`zmk_runtime_macro_dynamic_execute()`，成功（包括 empty/expired 的 harmless
+结果）返回 `ZMK_BEHAVIOR_OPAQUE`，busy 或其他启动错误原样返回；release 不会再次
+执行，只返回 opaque。driver 不读取、记录或输出动态文本，也不硬编码 USB/BLE
+endpoint。
+
+本阶段的门控决策为显式 opt-in：`CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC` 继续
+`default n`，仅在应用显式设为 `y` 且 `CONFIG_ZMK_RUNTIME_MACRO_USB_HID=y` 时
+提供 dynamic store/executor/behavior。它不反向启用 USB。新增的
+`CONFIG_ZMK_BEHAVIOR_RUNTIME_MACRO_DYNAMIC` 仅在 dynamic DT node 被引用、dynamic
+feature 已启用且构建位于 central/unibody 时启用。common runtime macro gate
+现在接受 static 或 dynamic compatible；未启用 dynamic feature 却引用 dynamic
+behavior 时，`runtime_macro_dynamic_guard.c` 在 central/unibody 和 split
+peripheral 都确定性地以编译错误停止，不能生成缺失 driver 的固件。
+
+Totem 的 `studio-rpc` 会设置 `ZMK_BEHAVIORS_KEEP_ALL`。为避免 static-only
+keymap 因 keep-all 无条件保留 dynamic node，`runtime_macro.dtsi` 在未显式指定
+`ZMK_BEHAVIORS_KEEP_RMD` 或 `ZMK_BEHAVIORS_OMIT_RMD` 时为 dynamic node 加入
+`/omit-if-no-ref/`；实际引用 `&runtime_macro_dynamic` 仍会保留该 node。static
+node 的 label、compatible、binding cell 数量和原有 omit 逻辑未改变。
+
+实现文件为：`Kconfig`、`CMakeLists.txt`、`dts/behaviors/runtime_macro.dtsi`、
+`dts/bindings/behaviors/zmk,behavior-runtime-macro-dynamic.yaml`、
+`src/behaviors/behavior_runtime_macro_dynamic.c`、
+`src/runtime_macro_dynamic_guard.c`，以及对应的 host behavior test/stubs。
+本阶段未修改 protocol、USB lifecycle、client、static behavior metadata 或
+ZMK 主仓库。
+
+验证结果：
+
+| 场景 | 结果 |
+|---|---|
+| Static-only Totem | 通过；dynamic 未设置；Flash `429632 B`，RAM `193278 B`（73.73%）；无 dynamic state/object |
+| Dynamic feature on、无 dynamic 引用 | 通过；Flash `430212 B`，RAM `194086 B`（74.04%）；dynamic state `0x228` |
+| True dynamic-only、显式 dynamic `y` | 通过；无 static `&runtime_macro` 引用；Flash `430432 B`，RAM `194094 B`（74.04%）；dynamic behavior/state 存在 |
+| Static + dynamic、显式 dynamic `y` | 通过；dynamic behavior/state 存在 |
+| True dynamic-only、未显式启用 dynamic | 按设计失败；guard 报错 |
+| `&runtime_macro_dynamic 1` | 按设计在 devicetree 阶段失败 |
+| USB-off central / split peripheral dynamic 引用 | Kconfig warning 后由 guard 确定失败；不编译 dynamic store/executor/behavior |
+| Split peripheral static-only | 通过；无 dynamic store/executor/behavior object |
+| Host suite | 容器内 `CLANG=gcc ./tests/host/run.sh` 全部通过，包括 dynamic behavior |
+
+所有 off/on 和 behavior build 均成功链接（预期失败场景除外），仅有既有
+`leen-display` 的 `ZMK_TRANSPORT_NONE` switch warning；`git diff --check`
+通过。下一阶段只可在用户确认后进入 dynamic protocol 与 capability，不得把
+behavior 直接扩展为协议执行入口。
+
 ---
 
 ## 10. 阶段 5：动态 protocol 与 capability

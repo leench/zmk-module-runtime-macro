@@ -6,6 +6,16 @@
 
 #include <dt-bindings/zmk/behaviors.h>
 
+/*
+ * Keep-all snippets retain every behavior node, which would otherwise make
+ * the dynamic feature look referenced in static-only keymaps.  Preserve the
+ * normal omit-if-no-ref behavior unless a keymap explicitly asks to keep the
+ * dynamic node for another reason.
+ */
+#if !defined(ZMK_BEHAVIORS_KEEP_RMD) && !defined(ZMK_BEHAVIORS_OMIT_RMD)
+#define ZMK_BEHAVIORS_OMIT_RMD
+#endif
+
 / {
     behaviors {
 #if ZMK_BEHAVIOR_OMIT(RM)
@@ -15,6 +25,14 @@
             compatible = "zmk,behavior-runtime-macro";
             #binding-cells = <1>;
             display-name = "Runtime Macro";
+        };
+#if ZMK_BEHAVIOR_OMIT(RMD)
+        /omit-if-no-ref/
+#endif
+        runtime_macro_dynamic: runtime_macro_dynamic {
+            compatible = "zmk,behavior-runtime-macro-dynamic";
+            #binding-cells = <0>;
+            display-name = "Runtime Macro Dynamic";
         };
     };
 };
