@@ -1167,3 +1167,27 @@ Phase 7 交接产物输出；Phase 8 继续负责桌面应用跨组件集成、�
   `194190 / 262144 B`，`zmk.uf2` 成功生成；
 - 默认行为保持消费；`--keep-after-execute` 发送 BEGIN flags bit 0，实物验证待
   新固件刷入后进行。
+
+## 18. 后续 TODO（不属于当前交付）
+
+### 18.1 上传级 lifecycle 策略
+
+在 `DYNAMIC_BEGIN` 的 flags 中增加上传级策略，让桌面应用在每次上传时选择：
+
+- BLE active profile 切换时 `preserve` 或 `clear`；
+- selected endpoint 切换时 `preserve` 或 `clear`；
+- 未设置时沿用当前默认：保留 dynamic text。
+
+该策略应随 committed object 保存，与 TTL、执行后消费/保留策略彼此独立。
+当前固件仍使用编译期 lifecycle policy，不实现此 TODO。
+
+### 18.2 多槽位与更大文本
+
+后续将 dynamic macro 扩展为最多 8 个彼此独立的槽位，每槽最大 512 bytes：
+
+- 每槽独立 text、TTL、执行后消费/保留和 lifecycle 策略；
+- 桌面应用可按槽位上传、清除和显示状态；
+- 继续共用单 executor，保持全局互斥，不允许并发执行；
+- 优先使用共享 staging buffer，重新评估 RAM、wire compatibility 和测试矩阵。
+
+当前实现仍是 1 个槽位、最大 256 bytes；上述扩展需单独设计、实现、验证和提交。
