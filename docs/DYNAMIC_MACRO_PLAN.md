@@ -720,6 +720,68 @@ behavior 直接扩展为协议执行入口。
 - 新 opcode 不改变静态命令信息泄露/认证校验顺序；
 - 不存在动态 readback 路径。
 
+### 10.7 Phase 5 实际完成记录
+
+Phase 5 已完成。现有 v2 32-byte protocol 已加入 `DYNAMIC_BEGIN (0x20)`、
+`DYNAMIC_DATA (0x21)`、`DYNAMIC_CLEAR (0x22)` 和 `CAPABILITIES (0x23)`。
+动态对象使用 `0xff` sentinel；protocol context 只保存 request ID、total、received
+和 active/deadline metadata，实际 staging bytes 仍由 Phase 2 的 dynamic store
+持有，没有新增第二套 256-byte protocol buffer。
+
+#### Dispatch、事务和生命周期边界
+
+- common frame/version/status/payload-length/tail validation 先执行；之后
+  CAPABILITIES 和 dynamic branch 直接处理，static LIST/GET/SET/CLEAR 才进入
+  static management authorization gate。
+- dynamic branch 不调用 static management access，不刷新 auth session，不调用
+  static slot/Settings API，不把 dynamic object 放入 LIST，也没有 dynamic GET 或
+  protocol EXECUTE；所有成功/错误 response 都不包含 dynamic text。
+- BEGIN 支持默认 TTL `300s` 和显式 `1..86400s` TTL；DATA 严格检查 slot、total、
+  request ID、连续 offset、chunk 长度和 ASCII/control alphabet。合法最终 chunk
+  才由 dynamic store 原子替换 committed；失败、重复、乱序、非法文本、timeout
+  和 transport/auth discard 只清 staging 并保留旧 committed。
+- dynamic transaction timeout 为 `30s`，与 committed TTL 分离；每个合法 BEGIN
+  和非最终 DATA 刷新 timeout。合法 CLEAR 同时清 committed/staging/TTL 且幂等；
+  malformed CLEAR/CAPABILITIES 保留 dynamic staging。版本错误等 common error 对
+  BEGIN/DATA 取消 staging，但 CLEAR/CAPABILITIES 保持 staging 不变。
+- auth 状态为 OPEN、PROTECTED（无论 session 是否有效）或 ERROR_LOCKED 时，
+  dynamic 命令均按自身格式处理，不返回 `AUTH_REQUIRED` 或其他 static auth error。
+  protocol 仍观察 auth state；实际 lazy expiry 只丢弃 incomplete staging，不清
+  committed，且 dynamic operation 不延长 session deadline。static
+  SET/PASSWORD_SET staging 与 dynamic staging 彼此独立。
+- CAPABILITIES 返回固定 22-byte metadata：version `1`、object count `1`、
+  max length `256`、TTL `300/1/86400`、transaction timeout `30`，当前 lifecycle
+  flags 为 boot/TTL/execution-accept/USB-disconnect 四项；不返回动态内容。
+
+#### 测试与构建记录
+
+- protocol host tests 覆盖 capability、`1/22/23/256` bytes、默认/显式 TTL、
+  request ID/total/offset、duplicate/out-of-order/zero/oversized/invalid text、
+  restart、final ACK 重传、CLEAR 幂等、static staging isolation、auth bypass、
+  lazy expiry、wrong-version staging 规则、discard 和 no-readback；既有
+  static/auth/USB tests 全部回归。
+- 在 `zmk-dev` 中运行 `CLANG=gcc ./tests/host/run.sh`：GCC、sanitizer、替代
+  编译器四轮全部通过；`git diff --check` 通过。
+- Totem 当前完整 `leen-display` 配置在 `zmk-dev` 中 off/on 均成功链接，只有既有
+  `leen-display` `ZMK_TRANSPORT_NONE` switch warning：
+
+| 构建 | Flash | RAM | map 关键状态 |
+|---|---:|---:|---|
+| Phase 5 off | 429632 B | 193294 B / 262144 B（73.74%） | dynamic/protocol dynamic symbols absent |
+| Phase 5 on | 431784 B | 194174 B / 262144 B（74.07%） | dynamic state `0x228`；protocol timeout work/mutex/owner present |
+
+相对 Phase 5 off，dynamic on 总增量为 Flash `+2152 B`、RAM `+880 B`，剩余 RAM
+为 `67970 B`。dynamic store object 未发现 Settings/NVS/static-slot 未解析
+依赖；feature-off ELF 未包含 dynamic symbols。未修改 ZMK 主仓库、USB lifecycle
+或 Python client。
+
+#### 阶段边界与后续衔接
+
+本阶段修改 `include/zmk/runtime_macro_protocol.h`、
+`src/runtime_macro_protocol.c` 和 `tests/host/runtime_macro_protocol_test.c`。
+下一阶段只可在用户确认后接入实际 USB/BLE lifecycle clear policy；不得在
+protocol 中加入 client、readback 或额外认证。
+
 ---
 
 ## 11. 阶段 6：生命周期和 clear policy
@@ -990,7 +1052,7 @@ behavior 直接扩展为协议执行入口。
 - [ ] Dynamic store/TTL 测试通过
 - [ ] Shared executor/consume 测试通过
 - [ ] `&runtime_macro_dynamic` 构建与行为测试通过
-- [ ] Dynamic protocol/capability 测试通过
+- [x] Dynamic protocol/capability 测试通过
 - [ ] USB/profile/output lifecycle 测试通过
 - [ ] Python API/CLI 测试通过
 - [ ] 现有 static/auth/USB tests 无回归

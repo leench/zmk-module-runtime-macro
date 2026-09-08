@@ -24,6 +24,7 @@
 #define CONFIG_ZMK_RUNTIME_MACRO_AUTH_SESSION_TIMEOUT 300
 #define CONFIG_ZMK_RUNTIME_MACRO_SLOT_COUNT 16
 #define CONFIG_ZMK_RUNTIME_MACRO_MAX_TEXT_LEN 64
+#define CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC 1
 
 #define ZMK_RUNTIME_MACRO_AUTH_TEST 1
 
@@ -48,7 +49,22 @@ int runtime_macro_auth_test_hmac(const uint8_t *key, const uint8_t *input,
 #include "../../src/runtime_macro_auth.c"
 #include "../../src/runtime_macro.c"
 #include "../../src/runtime_macro_ascii.c"
+#include "../../src/runtime_macro_dynamic.c"
 #include "../../src/runtime_macro_protocol.c"
+
+int host_work_schedule(struct k_work_delayable *work, k_timeout_t delay,
+                       bool reschedule) {
+  (void)reschedule;
+  work->scheduled = true;
+  work->delay = delay;
+  return 0;
+}
+
+int zmk_runtime_macro_executor_start(const uint8_t *text, size_t length) {
+  (void)text;
+  (void)length;
+  return 0;
+}
 
 _Static_assert(ZMK_RUNTIME_MACRO_PROTOCOL_FRAME_SIZE == 32U,
                "frame size changed");
@@ -116,8 +132,13 @@ int settings_delete(const char *name) {
 }
 
 static void reset_slots(void) {
+  if (runtime_macro_protocol_dynamic_timeout_owner != NULL) {
+    zmk_runtime_macro_protocol_discard(
+        runtime_macro_protocol_dynamic_timeout_owner);
+  }
   runtime_macro_auth_test_reset();
   host_uptime = 0;
+  zmk_runtime_macro_dynamic_reset();
   save_result = 0;
   delete_result = 0;
   for (uint8_t slot = 0; slot < CONFIG_ZMK_RUNTIME_MACRO_SLOT_COUNT; slot++) {
@@ -913,6 +934,555 @@ static void test_storage_errors_and_clear(void) {
   EXPECT_EQ(1, delete_calls);
 }
 
+static void expect_dynamic_text(const uint8_t *expected, size_t length) {
+  EXPECT_TRUE(runtime_macro_dynamic_state.committed_valid);
+  EXPECT_EQ(length, runtime_macro_dynamic_state.committed_length);
+  EXPECT_TRUE(memcmp(runtime_macro_dynamic_state.committed, expected, length) ==
+              0);
+  for (size_t i = length;
+       i < sizeof(runtime_macro_dynamic_state.committed); i++) {
+    EXPECT_EQ(0, runtime_macro_dynamic_state.committed[i]);
+  }
+}
+
+static void expect_dynamic_empty(void) {
+  EXPECT_TRUE(!runtime_macro_dynamic_state.committed_valid);
+  EXPECT_EQ(0, runtime_macro_dynamic_state.committed_length);
+  EXPECT_TRUE(!runtime_macro_dynamic_state.staging_active);
+  for (size_t i = 0; i < sizeof(runtime_macro_dynamic_state.committed); i++) {
+    EXPECT_EQ(0, runtime_macro_dynamic_state.committed[i]);
+  }
+  for (size_t i = 0; i < sizeof(runtime_macro_dynamic_state.staging); i++) {
+    EXPECT_EQ(0, runtime_macro_dynamic_state.staging[i]);
+  }
+}
+
+static void dynamic_begin(struct zmk_runtime_macro_protocol *protocol,
+                          uint8_t request_id, uint16_t total_length,
+                          uint32_t ttl_seconds, uint8_t *request,
+                          uint8_t *response) {
+  uint8_t ttl[4];
+  uint8_t payload_length = 0U;
+  const void *payload = NULL;
+
+  if (ttl_seconds != 0U) {
+    ttl[0] = (uint8_t)ttl_seconds;
+    ttl[1] = (uint8_t)(ttl_seconds >> 8);
+    ttl[2] = (uint8_t)(ttl_seconds >> 16);
+    ttl[3] = (uint8_t)(ttl_seconds >> 24);
+    payload_length = sizeof(ttl);
+    payload = ttl;
+  }
+
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION,
+               ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_BEGIN, request_id, 0,
+               ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 0, total_length,
+               payload_length, payload);
+  process_request(protocol, request, response);
+  expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_BEGIN,
+                 request_id, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 0,
+                 total_length, NULL, 0);
+}
+
+static void dynamic_data(struct zmk_runtime_macro_protocol *protocol,
+                         uint8_t request_id, uint16_t offset,
+                         uint16_t total_length, const void *payload,
+                         uint8_t payload_length, uint8_t *request,
+                         uint8_t *response) {
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION,
+               ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA, request_id, 0,
+               ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, offset, total_length,
+               payload_length, payload);
+  process_request(protocol, request, response);
+}
+
+static void commit_dynamic_text(struct zmk_runtime_macro_protocol *protocol,
+                                uint8_t request_id, const uint8_t *text,
+                                uint16_t length, uint8_t *request,
+                                uint8_t *response) {
+  dynamic_begin(protocol, request_id, length, 0U, request, response);
+  uint16_t offset = 0U;
+  while (offset < length) {
+    uint16_t remaining = (uint16_t)(length - offset);
+    uint8_t chunk = (uint8_t)(remaining > 22U ? 22U : remaining);
+    dynamic_data(protocol, request_id, offset, length, text + offset, chunk,
+                 request, response);
+    expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA,
+                   request_id, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
+                   offset + chunk, length, NULL, 0);
+    offset += chunk;
+  }
+}
+
+static void test_dynamic_wire_constants_and_capabilities(void) {
+  struct zmk_runtime_macro_protocol protocol;
+  uint8_t request[32];
+  uint8_t response[32];
+
+  reset_slots();
+  zmk_runtime_macro_protocol_init(&protocol);
+  EXPECT_EQ(0x20, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_BEGIN);
+  EXPECT_EQ(0x21, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA);
+  EXPECT_EQ(0x22, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_CLEAR);
+  EXPECT_EQ(0x23, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CAPABILITIES);
+  EXPECT_EQ(0xff, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT);
+  EXPECT_EQ(22, ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_PAYLOAD_LENGTH);
+  EXPECT_EQ(0x000f,
+            ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_LIFECYCLE_FLAGS);
+
+  make_request(request, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CAPABILITIES, 1,
+               0, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 0, 0, 0, NULL);
+  process_request(&protocol, request, response);
+  uint8_t expected[22] = {
+      1, 1, 0x0f, 0x00, 0x00, 0x01, 0x2c, 0x01, 0x00, 0x00,
+      0x01, 0x00, 0x00, 0x00, 0x80, 0x51, 0x01, 0x00, 0x1e, 0x00,
+      0x00, 0x00,
+  };
+  expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CAPABILITIES, 1,
+                 ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 0, 22, expected,
+                 22);
+  expect_dynamic_empty();
+
+  make_request(request, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CAPABILITIES, 2,
+               0, 0, 0, 0, 0, NULL);
+  process_request(&protocol, request, response);
+  expect_error(response, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CAPABILITIES, 2,
+               0, ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_SLOT);
+
+  make_request(request, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CAPABILITIES, 3,
+               0, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 1, 0, 0, NULL);
+  process_request(&protocol, request, response);
+  expect_error(response, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CAPABILITIES, 3,
+               ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST);
+}
+
+static void test_dynamic_upload_sizes_ttl_and_no_readback(void) {
+  struct zmk_runtime_macro_protocol protocol;
+  uint8_t request[32];
+  uint8_t response[32];
+  uint8_t text[256];
+  const uint16_t lengths[] = {1, 22, 23, 256};
+
+  reset_slots();
+  zmk_runtime_macro_protocol_init(&protocol);
+  memset(text, 'd', sizeof(text));
+
+  for (size_t test = 0; test < sizeof(lengths) / sizeof(lengths[0]); test++) {
+    uint16_t length = lengths[test];
+    uint8_t request_id = (uint8_t)(10U + test);
+    dynamic_begin(&protocol, request_id, length, test == 1U ? 600U : 0U,
+                  request, response);
+    uint16_t offset = 0U;
+    while (offset < length) {
+      uint16_t remaining = (uint16_t)(length - offset);
+      uint8_t chunk = (uint8_t)(remaining > 22U ? 22U : remaining);
+      dynamic_data(&protocol, request_id, offset, length, text + offset, chunk,
+                   request, response);
+      expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA,
+                     request_id, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
+                     offset + chunk, length, NULL, 0);
+      for (size_t i = 10; i < 32; i++) {
+        EXPECT_EQ(0, response[i]);
+      }
+      offset += chunk;
+    }
+    expect_dynamic_text(text, length);
+    if (test == 0U) {
+      EXPECT_EQ(300000, runtime_macro_dynamic_state.ttl_deadline_ms);
+    }
+    if (test == 1U) {
+      EXPECT_EQ(600000, runtime_macro_dynamic_state.ttl_deadline_ms);
+    }
+
+    make_request(request, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_CLEAR,
+                 (uint8_t)(100U + test), 0,
+                 ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 0, 0, 0, NULL);
+    process_request(&protocol, request, response);
+    expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_CLEAR,
+                   (uint8_t)(100U + test),
+                   ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 0, 0, NULL, 0);
+    expect_dynamic_empty();
+  }
+}
+
+static void test_dynamic_validation_and_restart(void) {
+  struct zmk_runtime_macro_protocol protocol;
+  uint8_t request[32];
+  uint8_t response[32];
+  const uint8_t old_text[] = "old";
+
+  reset_slots();
+  zmk_runtime_macro_protocol_init(&protocol);
+  commit_dynamic_text(&protocol, 1, old_text, sizeof(old_text) - 1U, request,
+                      response);
+  expect_dynamic_text(old_text, sizeof(old_text) - 1U);
+
+  dynamic_begin(&protocol, 2, 4, 0, request, response);
+  dynamic_data(&protocol, 2, 0, 4, "ab", 2, request, response);
+  dynamic_data(&protocol, 2, 0, 4, "ab", 2, request, response);
+  expect_error(response, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA, 2,
+               ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_OFFSET);
+  EXPECT_TRUE(!protocol.dynamic_active);
+  expect_dynamic_text(old_text, sizeof(old_text) - 1U);
+
+  dynamic_begin(&protocol, 3, 4, 0, request, response);
+  dynamic_data(&protocol, 3, 1, 4, "a", 1, request, response);
+  expect_error(response, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA, 3,
+               ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_OFFSET);
+  dynamic_begin(&protocol, 4, 4, 0, request, response);
+  dynamic_data(&protocol, 5, 0, 4, "a", 1, request, response);
+  expect_error(response, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA, 5,
+               ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST);
+
+  dynamic_begin(&protocol, 6, 4, 0, request, response);
+  dynamic_data(&protocol, 6, 0, 3, "a", 1, request, response);
+  expect_error(response, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA, 6,
+               ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST);
+
+  dynamic_begin(&protocol, 7, 4, 0, request, response);
+  dynamic_data(&protocol, 7, 0, 4, NULL, 0, request, response);
+  expect_error(response, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA, 7,
+               ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_LENGTH);
+
+  dynamic_begin(&protocol, 8, 4, 0, request, response);
+  make_request(request, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA, 8,
+               0, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 0, 4, 23, NULL);
+  process_request(&protocol, request, response);
+  expect_error(response, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA, 8,
+               ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_LENGTH);
+
+  dynamic_begin(&protocol, 9, 2, 0, request, response);
+  dynamic_data(&protocol, 9, 0, 2, "a\r", 2, request, response);
+  expect_error(response, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA, 9,
+               ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_INVALID_TEXT);
+  expect_dynamic_text(old_text, sizeof(old_text) - 1U);
+
+  dynamic_begin(&protocol, 10, 1, 0, request, response);
+  dynamic_data(&protocol, 10, 2, 1, "a", 1, request, response);
+  expect_error(response, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA, 10,
+               ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_OFFSET);
+
+  dynamic_begin(&protocol, 11, 1, 0, request, response);
+  dynamic_data(&protocol, 11, 0, 1, "ab", 2, request, response);
+  expect_error(response, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA, 11,
+               ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_LENGTH);
+
+  dynamic_begin(&protocol, 12, 2, 0, request, response);
+  dynamic_data(&protocol, 12, 0, 2, "xy", 2, request, response);
+  expect_dynamic_text((const uint8_t *)"xy", 2);
+  dynamic_data(&protocol, 12, 0, 2, "xy", 2, request, response);
+  expect_error(response, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA, 12,
+               ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST);
+  expect_dynamic_text((const uint8_t *)"xy", 2);
+
+  dynamic_begin(&protocol, 13, 4, 0, request, response);
+  dynamic_data(&protocol, 13, 0, 4, "ab", 2, request, response);
+  dynamic_begin(&protocol, 14, 2, 0, request, response);
+  dynamic_data(&protocol, 14, 0, 2, "ok", 2, request, response);
+  expect_dynamic_text((const uint8_t *)"ok", 2);
+
+  make_request(request, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_BEGIN,
+               15, 0, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 0, 2, 4,
+               (uint8_t[]){0, 0, 0, 0});
+  process_request(&protocol, request, response);
+  expect_error(response, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_BEGIN,
+               15, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_LENGTH);
+
+  make_request(request, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_BEGIN,
+               16, 0, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 0, 2, 4,
+               (uint8_t[]){0x51, 0xc4, 0x01, 0x00});
+  process_request(&protocol, request, response);
+  expect_error(response, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_BEGIN,
+               16, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_LENGTH);
+
+  make_request(request, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_BEGIN,
+               17, 0, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 0, 2, 1,
+               "x");
+  process_request(&protocol, request, response);
+  expect_error(response, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_BEGIN,
+               17, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_LENGTH);
+
+  dynamic_begin(&protocol, 18, 2, 0, request, response);
+  dynamic_data(&protocol, 18, 0, 2, "a", 1, request, response);
+  make_request(request, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA,
+               18, 1, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 1, 2, 1,
+               "b");
+  process_request(&protocol, request, response);
+  expect_error(response, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA,
+               18, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST);
+  EXPECT_TRUE(!protocol.dynamic_active);
+  expect_dynamic_text((const uint8_t *)"ok", 2);
+}
+
+static void test_dynamic_clear_and_static_staging_isolation(void) {
+  struct zmk_runtime_macro_protocol protocol;
+  uint8_t request[32];
+  uint8_t response[32];
+
+  reset_slots();
+  zmk_runtime_macro_protocol_init(&protocol);
+  make_request(request, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 20, 0, 1,
+               0, 6, 2, "st");
+  process_request(&protocol, request, response);
+  expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 20, 1, 2, 6,
+                 NULL, 0);
+  EXPECT_TRUE(protocol.set_active);
+
+  dynamic_begin(&protocol, 21, 3, 0, request, response);
+  dynamic_data(&protocol, 21, 0, 3, "dyn", 3, request, response);
+  expect_dynamic_text((const uint8_t *)"dyn", 3);
+  EXPECT_TRUE(protocol.set_active);
+
+  make_request(request, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_CLEAR,
+               22, 0, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 1, 0, 0, NULL);
+  process_request(&protocol, request, response);
+  expect_error(response, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_CLEAR, 22,
+               ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST);
+  EXPECT_TRUE(protocol.set_active);
+  expect_dynamic_text((const uint8_t *)"dyn", 3);
+
+  make_request(request, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_CLEAR,
+               23, 0, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 0, 0, 0, NULL);
+  process_request(&protocol, request, response);
+  expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_CLEAR, 23,
+                 ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 0, 0, NULL, 0);
+  expect_dynamic_empty();
+  EXPECT_TRUE(protocol.set_active);
+
+  make_request(request, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_CLEAR,
+               24, 0, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 0, 0, 0, NULL);
+  process_request(&protocol, request, response);
+  expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_CLEAR, 24,
+                 ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 0, 0, NULL, 0);
+  expect_dynamic_empty();
+  EXPECT_TRUE(protocol.set_active);
+
+  make_request(request, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 20, 0, 1,
+               2, 6, 4, "atic");
+  process_request(&protocol, request, response);
+  expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_SET, 20, 1, 6, 6,
+                 NULL, 0);
+  expect_slot(1, "static", 6);
+
+  commit_dynamic_text(&protocol, 25, (const uint8_t *)"dynamic", 7, request,
+                      response);
+  uint8_t list_expected[ZMK_RUNTIME_MACRO_PROTOCOL_PAYLOAD_SIZE] = {0};
+  list_expected[0] = CONFIG_ZMK_RUNTIME_MACRO_SLOT_COUNT;
+  list_expected[3] = 6;
+  make_request(request, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 26, 0,
+               ZMK_RUNTIME_MACRO_PROTOCOL_LIST_SLOT, 0, 0, 0, NULL);
+  process_request(&protocol, request, response);
+  expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST, 26,
+                 ZMK_RUNTIME_MACRO_PROTOCOL_LIST_SLOT, 0,
+                 (uint16_t)(1U + 2U * CONFIG_ZMK_RUNTIME_MACRO_SLOT_COUNT),
+                 list_expected, ZMK_RUNTIME_MACRO_PROTOCOL_PAYLOAD_SIZE);
+  EXPECT_EQ(6, frame_get_u16(response, 13));
+
+  make_request(request, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 27, 0, 1,
+               0, 0, 0, NULL);
+  process_request(&protocol, request, response);
+  expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_GET, 27, 1, 0, 6,
+                 "static", 6);
+}
+
+static void test_dynamic_transaction_timeout_and_discard(void) {
+  struct zmk_runtime_macro_protocol protocol;
+  uint8_t request[32];
+  uint8_t response[32];
+  const uint8_t old_text[] = "keep";
+
+  reset_slots();
+  zmk_runtime_macro_protocol_init(&protocol);
+  commit_dynamic_text(&protocol, 30, old_text, sizeof(old_text) - 1U, request,
+                      response);
+  dynamic_begin(&protocol, 31, 5, 0, request, response);
+  dynamic_data(&protocol, 31, 0, 5, "new", 3, request, response);
+  EXPECT_TRUE(protocol.dynamic_active);
+  host_uptime = 30001;
+  runtime_macro_protocol_dynamic_timeout_work.work.handler(
+      &runtime_macro_protocol_dynamic_timeout_work.work);
+  EXPECT_TRUE(!protocol.dynamic_active);
+  EXPECT_TRUE(!runtime_macro_dynamic_state.staging_active);
+  expect_dynamic_text(old_text, sizeof(old_text) - 1U);
+
+  dynamic_begin(&protocol, 32, 3, 0, request, response);
+  dynamic_data(&protocol, 32, 0, 3, "abc", 3, request, response);
+  EXPECT_TRUE(!protocol.dynamic_active);
+  zmk_runtime_macro_protocol_discard(&protocol);
+  expect_dynamic_text((const uint8_t *)"abc", 3);
+
+  dynamic_begin(&protocol, 33, 3, 0, request, response);
+  dynamic_data(&protocol, 33, 0, 3, "ab", 2, request, response);
+  make_request(request, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_CLEAR, 34,
+               0, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 1, 0, 0, NULL);
+  process_request(&protocol, request, response);
+  expect_error(response, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_CLEAR,
+               34, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST);
+  EXPECT_TRUE(protocol.dynamic_active);
+  EXPECT_TRUE(runtime_macro_dynamic_state.staging_active);
+  make_request(request, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_CLEAR, 35,
+               0, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 0, 0, 0, NULL);
+  process_request(&protocol, request, response);
+  expect_dynamic_empty();
+}
+
+static void test_dynamic_wrong_version_staging_rules(void) {
+  struct zmk_runtime_macro_protocol protocol;
+  uint8_t request[32];
+  uint8_t response[32];
+
+  reset_slots();
+  zmk_runtime_macro_protocol_init(&protocol);
+  dynamic_begin(&protocol, 50, 2, 0, request, response);
+  dynamic_data(&protocol, 50, 0, 2, "a", 1, request, response);
+  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_BEGIN, 51,
+               0, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 0, 2, 0, NULL);
+  process_request(&protocol, request, response);
+  expect_error(response, 1,
+               ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_BEGIN, 51,
+               ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_VERSION);
+  EXPECT_TRUE(!protocol.dynamic_active);
+  dynamic_data(&protocol, 50, 1, 2, "b", 1, request, response);
+  expect_error(response, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA, 50,
+               ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST);
+
+  dynamic_begin(&protocol, 52, 2, 0, request, response);
+  dynamic_data(&protocol, 52, 0, 2, "a", 1, request, response);
+  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA, 52,
+               0, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 1, 2, 1, "b");
+  process_request(&protocol, request, response);
+  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA, 52,
+               ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_VERSION);
+  EXPECT_TRUE(!protocol.dynamic_active);
+  dynamic_data(&protocol, 52, 1, 2, "b", 1, request, response);
+  expect_error(response, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA, 52,
+               ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST);
+
+  dynamic_begin(&protocol, 53, 2, 0, request, response);
+  dynamic_data(&protocol, 53, 0, 2, "c", 1, request, response);
+  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_CLEAR, 53,
+               0, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 0, 0, 0, NULL);
+  process_request(&protocol, request, response);
+  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_CLEAR,
+               53, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_VERSION);
+  EXPECT_TRUE(protocol.dynamic_active);
+  dynamic_data(&protocol, 53, 1, 2, "d", 1, request, response);
+  expect_dynamic_text((const uint8_t *)"cd", 2);
+
+  dynamic_begin(&protocol, 54, 2, 0, request, response);
+  dynamic_data(&protocol, 54, 0, 2, "e", 1, request, response);
+  make_request(request, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CAPABILITIES, 54,
+               0, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 0, 0, 0, NULL);
+  process_request(&protocol, request, response);
+  expect_error(response, 1, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CAPABILITIES,
+               54, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_VERSION);
+  EXPECT_TRUE(protocol.dynamic_active);
+  dynamic_data(&protocol, 54, 1, 2, "f", 1, request, response);
+  expect_dynamic_text((const uint8_t *)"ef", 2);
+}
+
+static void set_dynamic_credential(uint8_t marker) {
+  struct zmk_runtime_macro_auth_credential credential = {
+      .iterations = ZMK_RUNTIME_MACRO_AUTH_ITERATIONS_DEFAULT,
+  };
+  memset(credential.salt, marker, sizeof(credential.salt));
+  memset(credential.key, (int)(marker + 1U), sizeof(credential.key));
+  EXPECT_EQ(0, zmk_runtime_macro_auth_set_credential(&credential));
+}
+
+static void authenticate_dynamic_direct(void) {
+  uint8_t nonce[ZMK_RUNTIME_MACRO_AUTH_NONCE_SIZE];
+  uint8_t proof[ZMK_RUNTIME_MACRO_AUTH_PROOF_SIZE];
+  EXPECT_EQ(0, zmk_runtime_macro_auth_generate_challenge(nonce, sizeof(nonce)));
+  memset(proof, 0x5a, sizeof(proof));
+  EXPECT_EQ(0, zmk_runtime_macro_auth_verify_proof(proof, sizeof(proof)));
+}
+
+static void test_dynamic_bypasses_auth_without_refresh(void) {
+  struct zmk_runtime_macro_protocol protocol;
+  uint8_t request[32];
+  uint8_t response[32];
+
+  reset_slots();
+  zmk_runtime_macro_protocol_init(&protocol);
+  dynamic_begin(&protocol, 39, 1, 0, request, response);
+  dynamic_data(&protocol, 39, 0, 1, "o", 1, request, response);
+  expect_dynamic_text((const uint8_t *)"o", 1);
+  dynamic_begin(&protocol, 38, 2, 0, request, response);
+  dynamic_data(&protocol, 38, 0, 2, "x", 1, request, response);
+
+  set_dynamic_credential(0x41);
+  dynamic_data(&protocol, 38, 1, 2, "y", 1, request, response);
+  expect_error(response, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA, 38,
+               ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST);
+  expect_dynamic_text((const uint8_t *)"o", 1);
+  dynamic_begin(&protocol, 40, 1, 0, request, response);
+  dynamic_data(&protocol, 40, 0, 1, "p", 1, request, response);
+  expect_dynamic_text((const uint8_t *)"p", 1);
+
+  reset_slots();
+  zmk_runtime_macro_protocol_init(&protocol);
+  set_dynamic_credential(0x42);
+  authenticate_dynamic_direct();
+  int64_t deadline = runtime_macro_auth.session_deadline_ms;
+  dynamic_begin(&protocol, 41, 1, 0, request, response);
+  dynamic_data(&protocol, 41, 0, 1, "q", 1, request, response);
+  EXPECT_EQ(deadline, runtime_macro_auth.session_deadline_ms);
+  expect_dynamic_text((const uint8_t *)"q", 1);
+
+  make_request(request, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CAPABILITIES, 43,
+               0, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 0, 0, 0, NULL);
+  process_request(&protocol, request, response);
+  EXPECT_EQ(deadline, runtime_macro_auth.session_deadline_ms);
+
+  reset_slots();
+  zmk_runtime_macro_protocol_init(&protocol);
+  set_dynamic_credential(0x44);
+  authenticate_dynamic_direct();
+  dynamic_begin(&protocol, 44, 1, 600, request, response);
+  dynamic_data(&protocol, 44, 0, 1, "s", 1, request, response);
+  dynamic_begin(&protocol, 45, 2, 0, request, response);
+  dynamic_data(&protocol, 45, 0, 2, "t", 1, request, response);
+  host_uptime = 300001;
+  dynamic_data(&protocol, 45, 1, 2, "u", 1, request, response);
+  expect_error(response, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA, 45,
+               ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST);
+  expect_dynamic_text((const uint8_t *)"s", 1);
+
+  reset_slots();
+  zmk_runtime_macro_protocol_init(&protocol);
+  set_dynamic_credential(0x43);
+  runtime_macro_auth.state = ZMK_RUNTIME_MACRO_AUTH_STATE_ERROR_LOCKED;
+  dynamic_begin(&protocol, 42, 1, 0, request, response);
+  dynamic_data(&protocol, 42, 0, 1, "r", 1, request, response);
+  expect_dynamic_text((const uint8_t *)"r", 1);
+}
+
 int main(void) {
   test_wire_constants();
   test_malformed_common_requests();
@@ -925,6 +1495,13 @@ int main(void) {
   test_set_invalid_chunks_clear_staging();
   test_set_range_validation_and_common_clear();
   test_storage_errors_and_clear();
+  test_dynamic_wire_constants_and_capabilities();
+  test_dynamic_upload_sizes_ttl_and_no_readback();
+  test_dynamic_validation_and_restart();
+  test_dynamic_clear_and_static_staging_isolation();
+  test_dynamic_transaction_timeout_and_discard();
+  test_dynamic_wrong_version_staging_rules();
+  test_dynamic_bypasses_auth_without_refresh();
 
   if (failures != 0) {
     fprintf(stderr, "%d test assertion(s) failed\n", failures);

@@ -10,9 +10,15 @@
 #include <stdint.h>
 #include <string.h>
 
+#include <zephyr/kernel.h>
+
 #include <zmk/runtime_macro.h>
 #include <zmk/runtime_macro_auth.h>
 #include <zmk/runtime_macro_protocol.h>
+
+#if defined(CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC)
+#include "runtime_macro_dynamic_internal.h"
+#endif
 
 #define RUNTIME_MACRO_PROTOCOL_AUTH_INFO_LENGTH 22U
 #define RUNTIME_MACRO_PROTOCOL_AUTH_FLAGS_CONFIGURED (1U << 0)
@@ -34,6 +40,15 @@ static uint32_t runtime_macro_protocol_get_u32(const uint8_t *data) {
          ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
 }
 
+#if defined(CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC)
+static void runtime_macro_protocol_put_u32(uint8_t *data, uint32_t value) {
+  data[0] = (uint8_t)value;
+  data[1] = (uint8_t)(value >> 8);
+  data[2] = (uint8_t)(value >> 16);
+  data[3] = (uint8_t)(value >> 24);
+}
+#endif
+
 static void runtime_macro_protocol_zeroize(void *data, size_t length) {
   volatile uint8_t *bytes = data;
 
@@ -42,6 +57,83 @@ static void runtime_macro_protocol_zeroize(void *data, size_t length) {
     length--;
   }
 }
+
+#if defined(CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC)
+static K_MUTEX_DEFINE(runtime_macro_protocol_dynamic_timeout_mutex);
+static struct zmk_runtime_macro_protocol *
+    runtime_macro_protocol_dynamic_timeout_owner;
+
+static void runtime_macro_protocol_dynamic_timeout_work_handler(
+    struct k_work *work);
+K_WORK_DELAYABLE_DEFINE(runtime_macro_protocol_dynamic_timeout_work,
+                        runtime_macro_protocol_dynamic_timeout_work_handler);
+
+static void runtime_macro_protocol_clear_dynamic_locked(
+    struct zmk_runtime_macro_protocol *protocol) {
+  if (runtime_macro_protocol_dynamic_timeout_owner == protocol) {
+    runtime_macro_protocol_dynamic_timeout_owner = NULL;
+    (void)k_work_cancel_delayable(&runtime_macro_protocol_dynamic_timeout_work);
+  }
+
+  zmk_runtime_macro_dynamic_cancel_staging();
+  protocol->dynamic_active = false;
+  protocol->dynamic_request_id = 0U;
+  protocol->dynamic_total_length = 0U;
+  protocol->dynamic_received_length = 0U;
+  protocol->dynamic_deadline_ms = 0;
+}
+
+static void runtime_macro_protocol_clear_dynamic(
+    struct zmk_runtime_macro_protocol *protocol) {
+  if (protocol == NULL) {
+    return;
+  }
+
+  (void)k_mutex_lock(&runtime_macro_protocol_dynamic_timeout_mutex,
+                     K_FOREVER);
+  runtime_macro_protocol_clear_dynamic_locked(protocol);
+  (void)k_mutex_unlock(&runtime_macro_protocol_dynamic_timeout_mutex);
+}
+
+static int runtime_macro_protocol_refresh_dynamic_timeout_locked(
+    struct zmk_runtime_macro_protocol *protocol) {
+  protocol->dynamic_deadline_ms =
+      k_uptime_get() +
+      ((int64_t)ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_TRANSACTION_TIMEOUT_SECONDS *
+       1000);
+  runtime_macro_protocol_dynamic_timeout_owner = protocol;
+  return k_work_reschedule(&runtime_macro_protocol_dynamic_timeout_work,
+                           K_MSEC(ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_TRANSACTION_TIMEOUT_SECONDS *
+                                  1000));
+}
+
+static void runtime_macro_protocol_dynamic_timeout_work_handler(
+    struct k_work *work) {
+  ARG_UNUSED(work);
+
+  (void)k_mutex_lock(&runtime_macro_protocol_dynamic_timeout_mutex,
+                     K_FOREVER);
+
+  struct zmk_runtime_macro_protocol *protocol =
+      runtime_macro_protocol_dynamic_timeout_owner;
+  if (protocol == NULL || !protocol->dynamic_active) {
+    runtime_macro_protocol_dynamic_timeout_owner = NULL;
+    (void)k_mutex_unlock(&runtime_macro_protocol_dynamic_timeout_mutex);
+    return;
+  }
+
+  int64_t now = k_uptime_get();
+  if (now < protocol->dynamic_deadline_ms) {
+    (void)k_work_reschedule(&runtime_macro_protocol_dynamic_timeout_work,
+                            K_MSEC(protocol->dynamic_deadline_ms - now));
+    (void)k_mutex_unlock(&runtime_macro_protocol_dynamic_timeout_mutex);
+    return;
+  }
+
+  runtime_macro_protocol_clear_dynamic_locked(protocol);
+  (void)k_mutex_unlock(&runtime_macro_protocol_dynamic_timeout_mutex);
+}
+#endif
 
 static void
 runtime_macro_protocol_clear_set(struct zmk_runtime_macro_protocol *protocol) {
@@ -70,6 +162,9 @@ void zmk_runtime_macro_protocol_discard(
     return;
   }
 
+#if defined(CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC)
+  runtime_macro_protocol_clear_dynamic(protocol);
+#endif
   runtime_macro_protocol_zeroize(protocol, sizeof(*protocol));
 }
 
@@ -125,6 +220,12 @@ static bool runtime_macro_protocol_opcode_is_known(uint8_t opcode) {
   case ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_AUTH_PROVE:
   case ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_PASSWORD_SET:
   case ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LOCK:
+#if defined(CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC)
+  case ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_BEGIN:
+  case ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA:
+  case ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_CLEAR:
+  case ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CAPABILITIES:
+#endif
     return true;
   default:
     return false;
@@ -139,6 +240,13 @@ static bool runtime_macro_protocol_is_password_set_opcode(uint8_t opcode) {
   return opcode == ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_PASSWORD_SET;
 }
 
+#if defined(CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC)
+static bool runtime_macro_protocol_is_dynamic_begin_or_data(uint8_t opcode) {
+  return opcode == ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_BEGIN ||
+         opcode == ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA;
+}
+#endif
+
 static void runtime_macro_protocol_discard_for_opcode(
     struct zmk_runtime_macro_protocol *protocol, uint8_t opcode) {
   if (protocol == NULL) {
@@ -149,6 +257,10 @@ static void runtime_macro_protocol_discard_for_opcode(
     runtime_macro_protocol_clear_set(protocol);
   } else if (runtime_macro_protocol_is_password_set_opcode(opcode)) {
     runtime_macro_protocol_clear_password_set(protocol);
+#if defined(CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC)
+  } else if (runtime_macro_protocol_is_dynamic_begin_or_data(opcode)) {
+    runtime_macro_protocol_clear_dynamic(protocol);
+#endif
   }
 }
 
@@ -190,6 +302,289 @@ static bool runtime_macro_protocol_request_has_empty_object(
          runtime_macro_protocol_get_u16(
              request, ZMK_RUNTIME_MACRO_PROTOCOL_TOTAL_LENGTH_OFFSET) == 0U;
 }
+
+#if defined(CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC)
+static bool
+runtime_macro_protocol_set_payload_is_valid(const uint8_t *request,
+                                            uint8_t payload_length);
+
+static int runtime_macro_protocol_process_capabilities(const uint8_t *request,
+                                                       uint8_t *response) {
+  if (request[ZMK_RUNTIME_MACRO_PROTOCOL_SLOT_OFFSET] !=
+      ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT) {
+    runtime_macro_protocol_set_error(
+        response, ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_SLOT);
+    return 0;
+  }
+
+  if (!runtime_macro_protocol_request_has_empty_object(request)) {
+    runtime_macro_protocol_set_error(
+        response, ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST);
+    return 0;
+  }
+
+  uint8_t *payload =
+      response + ZMK_RUNTIME_MACRO_PROTOCOL_PAYLOAD_OFFSET;
+  payload[0] = ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_VERSION;
+  payload[1] = ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_OBJECT_COUNT;
+  payload[2] = (uint8_t)ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_LIFECYCLE_FLAGS;
+  payload[3] = (uint8_t)(ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_LIFECYCLE_FLAGS >>
+                         8);
+  payload[4] = (uint8_t)ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_MAX_LENGTH;
+  payload[5] = (uint8_t)(ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_MAX_LENGTH >> 8);
+  runtime_macro_protocol_put_u32(
+      payload + 6U,
+      ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_DEFAULT_TTL_SECONDS);
+  runtime_macro_protocol_put_u32(
+      payload + 10U,
+      ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_MIN_TTL_SECONDS);
+  runtime_macro_protocol_put_u32(
+      payload + 14U,
+      ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_MAX_TTL_SECONDS);
+  runtime_macro_protocol_put_u32(
+      payload + 18U,
+      ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_TRANSACTION_TIMEOUT_SECONDS);
+  response[ZMK_RUNTIME_MACRO_PROTOCOL_PAYLOAD_LENGTH_OFFSET] =
+      ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_PAYLOAD_LENGTH;
+  runtime_macro_protocol_set_success(
+      response, 0U, ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_PAYLOAD_LENGTH);
+  return 0;
+}
+
+static int runtime_macro_protocol_process_dynamic_begin(
+    struct zmk_runtime_macro_protocol *protocol, const uint8_t *request,
+    uint8_t *response) {
+  const uint8_t payload_length =
+      request[ZMK_RUNTIME_MACRO_PROTOCOL_PAYLOAD_LENGTH_OFFSET];
+  const uint16_t offset = runtime_macro_protocol_get_u16(
+      request, ZMK_RUNTIME_MACRO_PROTOCOL_OFFSET_OFFSET);
+  const uint16_t total_length = runtime_macro_protocol_get_u16(
+      request, ZMK_RUNTIME_MACRO_PROTOCOL_TOTAL_LENGTH_OFFSET);
+  uint32_t ttl_seconds =
+      ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_DEFAULT_TTL_SECONDS;
+
+  if (request[ZMK_RUNTIME_MACRO_PROTOCOL_SLOT_OFFSET] !=
+      ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT) {
+    runtime_macro_protocol_clear_dynamic(protocol);
+    runtime_macro_protocol_set_error(
+        response, ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_SLOT);
+    return 0;
+  }
+
+  if (offset != 0U) {
+    runtime_macro_protocol_clear_dynamic(protocol);
+    runtime_macro_protocol_set_error(
+        response, ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_OFFSET);
+    return 0;
+  }
+
+  if (total_length == 0U ||
+      total_length > ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_MAX_LENGTH) {
+    runtime_macro_protocol_clear_dynamic(protocol);
+    runtime_macro_protocol_set_error(
+        response, ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_LENGTH);
+    return 0;
+  }
+
+  if (payload_length != 0U && payload_length != sizeof(uint32_t)) {
+    runtime_macro_protocol_clear_dynamic(protocol);
+    runtime_macro_protocol_set_error(
+        response, ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_LENGTH);
+    return 0;
+  }
+
+  if (payload_length == sizeof(uint32_t)) {
+    ttl_seconds = runtime_macro_protocol_get_u32(
+        request + ZMK_RUNTIME_MACRO_PROTOCOL_PAYLOAD_OFFSET);
+  }
+  if (ttl_seconds < ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_MIN_TTL_SECONDS ||
+      ttl_seconds > ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_MAX_TTL_SECONDS) {
+    runtime_macro_protocol_clear_dynamic(protocol);
+    runtime_macro_protocol_set_error(
+        response, ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_LENGTH);
+    return 0;
+  }
+
+  (void)k_mutex_lock(&runtime_macro_protocol_dynamic_timeout_mutex,
+                     K_FOREVER);
+  int err = zmk_runtime_macro_dynamic_begin(total_length, ttl_seconds);
+  if (err == 0) {
+    protocol->dynamic_active = true;
+    protocol->dynamic_request_id =
+        request[ZMK_RUNTIME_MACRO_PROTOCOL_REQUEST_ID_OFFSET];
+    protocol->dynamic_total_length = total_length;
+    protocol->dynamic_received_length = 0U;
+    err = runtime_macro_protocol_refresh_dynamic_timeout_locked(protocol);
+  }
+  if (err != 0) {
+    runtime_macro_protocol_clear_dynamic_locked(protocol);
+  }
+  (void)k_mutex_unlock(&runtime_macro_protocol_dynamic_timeout_mutex);
+
+  if (err != 0) {
+    runtime_macro_protocol_set_error(
+        response, err == -EINVAL
+                     ? ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_LENGTH
+                     : ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_INTERNAL);
+    return 0;
+  }
+
+  runtime_macro_protocol_set_success(response, 0U, total_length);
+  return 0;
+}
+
+static int runtime_macro_protocol_process_dynamic_data(
+    struct zmk_runtime_macro_protocol *protocol, const uint8_t *request,
+    uint8_t *response) {
+  const uint8_t request_id =
+      request[ZMK_RUNTIME_MACRO_PROTOCOL_REQUEST_ID_OFFSET];
+  const uint8_t payload_length =
+      request[ZMK_RUNTIME_MACRO_PROTOCOL_PAYLOAD_LENGTH_OFFSET];
+  const uint16_t offset = runtime_macro_protocol_get_u16(
+      request, ZMK_RUNTIME_MACRO_PROTOCOL_OFFSET_OFFSET);
+  const uint16_t total_length = runtime_macro_protocol_get_u16(
+      request, ZMK_RUNTIME_MACRO_PROTOCOL_TOTAL_LENGTH_OFFSET);
+
+  (void)k_mutex_lock(&runtime_macro_protocol_dynamic_timeout_mutex,
+                     K_FOREVER);
+  if (request[ZMK_RUNTIME_MACRO_PROTOCOL_SLOT_OFFSET] !=
+      ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT) {
+    runtime_macro_protocol_clear_dynamic_locked(protocol);
+    (void)k_mutex_unlock(&runtime_macro_protocol_dynamic_timeout_mutex);
+    runtime_macro_protocol_set_error(
+        response, ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_SLOT);
+    return 0;
+  }
+
+  if (total_length == 0U ||
+      total_length > ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_MAX_LENGTH) {
+    runtime_macro_protocol_clear_dynamic_locked(protocol);
+    (void)k_mutex_unlock(&runtime_macro_protocol_dynamic_timeout_mutex);
+    runtime_macro_protocol_set_error(
+        response, ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_LENGTH);
+    return 0;
+  }
+
+  if (offset > total_length) {
+    runtime_macro_protocol_clear_dynamic_locked(protocol);
+    (void)k_mutex_unlock(&runtime_macro_protocol_dynamic_timeout_mutex);
+    runtime_macro_protocol_set_error(
+        response, ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_OFFSET);
+    return 0;
+  }
+
+  if (payload_length == 0U ||
+      payload_length > (uint16_t)(total_length - offset)) {
+    runtime_macro_protocol_clear_dynamic_locked(protocol);
+    (void)k_mutex_unlock(&runtime_macro_protocol_dynamic_timeout_mutex);
+    runtime_macro_protocol_set_error(
+        response, ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_LENGTH);
+    return 0;
+  }
+
+  if (!protocol->dynamic_active || protocol->dynamic_request_id != request_id ||
+      protocol->dynamic_total_length != total_length) {
+    runtime_macro_protocol_clear_dynamic_locked(protocol);
+    (void)k_mutex_unlock(&runtime_macro_protocol_dynamic_timeout_mutex);
+    runtime_macro_protocol_set_error(
+        response, ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST);
+    return 0;
+  }
+
+  if (offset != protocol->dynamic_received_length) {
+    runtime_macro_protocol_clear_dynamic_locked(protocol);
+    (void)k_mutex_unlock(&runtime_macro_protocol_dynamic_timeout_mutex);
+    runtime_macro_protocol_set_error(
+        response, ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_OFFSET);
+    return 0;
+  }
+
+  if (!runtime_macro_protocol_set_payload_is_valid(request, payload_length)) {
+    runtime_macro_protocol_clear_dynamic_locked(protocol);
+    (void)k_mutex_unlock(&runtime_macro_protocol_dynamic_timeout_mutex);
+    runtime_macro_protocol_set_error(
+        response, ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_INVALID_TEXT);
+    return 0;
+  }
+
+  int err = zmk_runtime_macro_dynamic_append(
+      offset, request + ZMK_RUNTIME_MACRO_PROTOCOL_PAYLOAD_OFFSET,
+      payload_length);
+  if (err != 0) {
+    runtime_macro_protocol_clear_dynamic_locked(protocol);
+    (void)k_mutex_unlock(&runtime_macro_protocol_dynamic_timeout_mutex);
+    runtime_macro_protocol_set_error(
+        response, err == -ENOENT
+                     ? ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST
+                     : ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_INTERNAL);
+    return 0;
+  }
+
+  const uint16_t next_offset = offset + payload_length;
+  protocol->dynamic_received_length = next_offset;
+  if (next_offset == protocol->dynamic_total_length) {
+    if (runtime_macro_protocol_dynamic_timeout_owner == protocol) {
+      runtime_macro_protocol_dynamic_timeout_owner = NULL;
+      (void)k_work_cancel_delayable(
+          &runtime_macro_protocol_dynamic_timeout_work);
+    }
+    protocol->dynamic_active = false;
+    protocol->dynamic_request_id = 0U;
+    protocol->dynamic_total_length = 0U;
+    protocol->dynamic_received_length = 0U;
+    protocol->dynamic_deadline_ms = 0;
+  } else {
+    err = runtime_macro_protocol_refresh_dynamic_timeout_locked(protocol);
+    if (err != 0) {
+      runtime_macro_protocol_clear_dynamic_locked(protocol);
+    }
+  }
+  (void)k_mutex_unlock(&runtime_macro_protocol_dynamic_timeout_mutex);
+
+  if (err != 0) {
+    runtime_macro_protocol_set_error(
+        response, ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_INTERNAL);
+    return 0;
+  }
+
+  runtime_macro_protocol_set_success(response, next_offset, total_length);
+  return 0;
+}
+
+static int runtime_macro_protocol_process_dynamic_clear(
+    struct zmk_runtime_macro_protocol *protocol, const uint8_t *request,
+    uint8_t *response) {
+  if (request[ZMK_RUNTIME_MACRO_PROTOCOL_SLOT_OFFSET] !=
+      ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT) {
+    runtime_macro_protocol_set_error(
+        response, ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_SLOT);
+    return 0;
+  }
+
+  if (!runtime_macro_protocol_request_has_empty_object(request)) {
+    runtime_macro_protocol_set_error(
+        response, ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST);
+    return 0;
+  }
+
+  (void)k_mutex_lock(&runtime_macro_protocol_dynamic_timeout_mutex,
+                     K_FOREVER);
+  zmk_runtime_macro_dynamic_clear();
+  if (runtime_macro_protocol_dynamic_timeout_owner == protocol) {
+    runtime_macro_protocol_dynamic_timeout_owner = NULL;
+    (void)k_work_cancel_delayable(&runtime_macro_protocol_dynamic_timeout_work);
+  }
+  protocol->dynamic_active = false;
+  protocol->dynamic_request_id = 0U;
+  protocol->dynamic_total_length = 0U;
+  protocol->dynamic_received_length = 0U;
+  protocol->dynamic_deadline_ms = 0;
+  (void)k_mutex_unlock(&runtime_macro_protocol_dynamic_timeout_mutex);
+
+  runtime_macro_protocol_set_success(response, 0U, 0U);
+  return 0;
+}
+#endif
 
 /*
  * This is deliberately called before opcode-specific validation. It is the
@@ -248,6 +643,9 @@ static void runtime_macro_protocol_sync_auth_state(
      * replacement, settings reload, and ERROR_LOCKED transition. */
     runtime_macro_protocol_clear_set(protocol);
     runtime_macro_protocol_clear_password_set(protocol);
+#if defined(CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC)
+    runtime_macro_protocol_clear_dynamic(protocol);
+#endif
   }
 
   protocol->auth_state_known = true;
@@ -858,6 +1256,8 @@ int zmk_runtime_macro_protocol_process(
   /* Base frame validation order is part of the information-leak boundary. */
   if (request[ZMK_RUNTIME_MACRO_PROTOCOL_VERSION_OFFSET] !=
       ZMK_RUNTIME_MACRO_PROTOCOL_VERSION) {
+    /* discard_for_opcode is intentionally a no-op for malformed CLEAR and
+     * CAPABILITIES, while BEGIN/DATA must cancel only dynamic staging. */
     runtime_macro_protocol_discard_for_opcode(protocol, opcode);
     runtime_macro_protocol_set_error(
         response, ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_VERSION);
@@ -892,6 +1292,19 @@ int zmk_runtime_macro_protocol_process(
   }
 
   switch (opcode) {
+#if defined(CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC)
+  case ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CAPABILITIES:
+    return runtime_macro_protocol_process_capabilities(request, response);
+  case ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_BEGIN:
+    return runtime_macro_protocol_process_dynamic_begin(protocol, request,
+                                                         response);
+  case ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA:
+    return runtime_macro_protocol_process_dynamic_data(protocol, request,
+                                                        response);
+  case ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_CLEAR:
+    return runtime_macro_protocol_process_dynamic_clear(protocol, request,
+                                                        response);
+#endif
   case ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_AUTH_INFO:
     return runtime_macro_protocol_process_auth_info(request, response);
   case ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_AUTH_CHALLENGE:
