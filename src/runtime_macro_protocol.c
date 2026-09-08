@@ -102,9 +102,11 @@ static int runtime_macro_protocol_refresh_dynamic_timeout_locked(
       ((int64_t)ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_TRANSACTION_TIMEOUT_SECONDS *
        1000);
   runtime_macro_protocol_dynamic_timeout_owner = protocol;
-  return k_work_reschedule(&runtime_macro_protocol_dynamic_timeout_work,
-                           K_MSEC(ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_TRANSACTION_TIMEOUT_SECONDS *
-                                  1000));
+  int status = k_work_reschedule(
+      &runtime_macro_protocol_dynamic_timeout_work,
+      K_MSEC(ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_TRANSACTION_TIMEOUT_SECONDS *
+             1000));
+  return status < 0 ? status : 0;
 }
 
 static void runtime_macro_protocol_dynamic_timeout_work_handler(

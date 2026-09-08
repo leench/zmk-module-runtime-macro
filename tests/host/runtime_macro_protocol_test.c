@@ -61,7 +61,7 @@ int host_work_schedule(struct k_work_delayable *work, k_timeout_t delay,
   (void)reschedule;
   work->scheduled = true;
   work->delay = delay;
-  return 0;
+  return 1;
 }
 
 int zmk_runtime_macro_executor_start(const uint8_t *text, size_t length) {
