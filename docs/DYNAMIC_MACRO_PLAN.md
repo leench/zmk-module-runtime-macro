@@ -952,6 +952,31 @@ flags 会按实际 policy 动态反映。
 - background service 可直接调用 library API；
 - `python -m unittest`、`py_compile` 和 Ruff 检查通过。
 
+### 12.7 Phase 7 完成记录
+
+Phase 7 已实现，范围严格限定为参考 Python client/CLI，没有修改桌面应用代码：
+
+- `RuntimeMacroClient.get_capabilities()` 严格解析固定 22-byte CAPABILITIES payload，拒绝未知版本、
+  保留 lifecycle flags、错误对象数量、长度或 TTL 元数据；`BAD_OPCODE` 转换为明确的
+  `DynamicUnsupportedError`，不回退到 static SET；
+- `upload_dynamic(data, ttl_seconds=None)` 在首次 HID write 前完成长度、ASCII/control 和 TTL 校验，
+  先探测能力，再以最多 22 bytes 分块发送 BEGIN/DATA；同一上传使用同一 request ID，超时、
+  `BAD_REQUEST`、`BAD_OFFSET` 以新 request ID 从 BEGIN 完整重启；
+- `clear_dynamic()` 先探测能力，再对 DYNAMIC_CLEAR 做可恢复重试；没有 `get_dynamic()` 或其他
+  readback API；dynamic 操作不触发 login、不改变 static/auth client state；
+- CLI 增加 `capabilities`、`dynamic-set`、`dynamic-clear`，输入接口复用 `--text`、`--stdin`、
+  `--file`，支持 `--ttl`；
+- fake-HID 覆盖 capability supported/unsupported/malformed、1/22/23/256-byte chunking、默认和
+  显式 TTL、transport timeout、`BAD_OFFSET` restart、clear retry、输入零写入保证、response metadata
+  校验和 PROTECTED 未登录场景；既有 static/auth 测试保持通过；
+- 更新 `docs/CLI.md`，记录 library/CLI 使用方式和 dynamic 安全边界。
+
+独立验证结果：`python3 -m unittest discover -s tests/python` 共 59 tests 通过，
+`python3 -m py_compile tools/runtime_macro_cli.py tests/python/test_runtime_macro_cli.py` 通过，
+`ruff check tools/runtime_macro_cli.py tests/python/test_runtime_macro_cli.py` 通过，
+`git diff --check` 通过。修改文件为 `tools/runtime_macro_cli.py`、`tests/python/test_runtime_macro_cli.py`、
+`docs/CLI.md` 和本计划文档。Phase 8 继续负责桌面应用实施文档、跨组件集成和最终硬件验证。
+
 ---
 
 ## 13. 阶段 8：集成、硬件验证和文档

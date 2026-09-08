@@ -154,6 +154,18 @@ def auth_info_payload(
     return bytes([flags, cli.AUTH_KDF_ID]) + iterations.to_bytes(4, "little") + bytes(salt)
 
 
+def dynamic_capabilities_payload(*, lifecycle_flags=0x0F, max_length=256):
+    return (
+        bytes([cli.DYNAMIC_CAPABILITY_VERSION, cli.DYNAMIC_OBJECT_COUNT])
+        + lifecycle_flags.to_bytes(2, "little")
+        + max_length.to_bytes(2, "little")
+        + cli.DYNAMIC_DEFAULT_TTL_SECONDS.to_bytes(4, "little")
+        + cli.DYNAMIC_MIN_TTL_SECONDS.to_bytes(4, "little")
+        + cli.DYNAMIC_MAX_TTL_SECONDS.to_bytes(4, "little")
+        + cli.DYNAMIC_TRANSACTION_TIMEOUT_SECONDS.to_bytes(4, "little")
+    )
+
+
 def empty_ack(request):
     frame = bytearray(32)
     frame[0] = request[0]
@@ -1114,7 +1126,291 @@ class AuthClientTests(unittest.TestCase):
         self.assertEqual(1, len(device.writes))
 
 
+class DynamicClientTests(unittest.TestCase):
+    def make_client(self, responder=None, *, device=None, retries=1):
+        device = device or FakeDevice(responder)
+        module = FakeHid([record()], device)
+        transport = cli.open_transport(module)
+        self.addCleanup(transport.close)
+        return (
+            cli.RuntimeMacroClient(transport, timeout_ms=10, retries=retries),
+            device,
+        )
+
+    def test_capabilities_request_and_strict_response(self):
+        def reply(device, wire):
+            request = wire[1:]
+            expected = bytes(
+                [2, cli.OPCODE_CAPABILITIES, 0, 0, cli.LIST_SLOT, 0, 0, 0, 0, 0]
+            ) + bytes(22)
+            self.assertEqual(expected, request)
+            device.read_queue.append(
+                response(
+                    request,
+                    payload=dynamic_capabilities_payload(lifecycle_flags=0x3F),
+                    total=22,
+                )
+            )
+
+        client, device = self.make_client(reply, retries=0)
+        capabilities = client.get_capabilities()
+        self.assertEqual(0x3F, capabilities.lifecycle_flags)
+        self.assertTrue(capabilities.clear_on_usb_disconnect)
+        self.assertTrue(capabilities.clear_on_ble_profile_change)
+        self.assertTrue(capabilities.clear_on_selected_endpoint_change)
+        self.assertEqual(1, len(device.writes))
+
+    def test_capabilities_rejects_unsupported_and_malformed_responses(self):
+        def unsupported(device, wire):
+            device.read_queue.append(response(wire[1:], status=cli.STATUS_BAD_OPCODE))
+
+        client, _ = self.make_client(unsupported, retries=0)
+        with self.assertRaises(cli.DynamicUnsupportedError):
+            client.get_capabilities()
+
+        for payload in (
+            dynamic_capabilities_payload(lifecycle_flags=0x40),
+            dynamic_capabilities_payload(max_length=255),
+        ):
+            with self.subTest(payload=payload):
+                def malformed(device, wire, *, payload=payload):
+                    device.read_queue.append(response(wire[1:], payload=payload, total=22))
+
+                client, _ = self.make_client(malformed, retries=0)
+                with self.assertRaises(cli.ProtocolError):
+                    client.get_capabilities()
+
+    def test_dynamic_upload_chunk_boundaries_and_default_ttl(self):
+        for length, expected_chunks in (
+            (1, [1]),
+            (22, [22]),
+            (23, [22, 1]),
+            (256, [22] * 11 + [14]),
+        ):
+            with self.subTest(length=length):
+                seen = []
+
+                def reply(device, wire, *, seen=seen, length=length):
+                    request = wire[1:]
+                    seen.append(request)
+                    if request[1] == cli.OPCODE_CAPABILITIES:
+                        device.read_queue.append(
+                            response(
+                                request,
+                                payload=dynamic_capabilities_payload(),
+                                total=22,
+                            )
+                        )
+                    elif request[1] == cli.OPCODE_DYNAMIC_BEGIN:
+                        self.assertEqual(0, request[5])
+                        self.assertEqual(0, int.from_bytes(request[6:8], "little"))
+                        device.read_queue.append(
+                            response(request, offset=0, total=length)
+                        )
+                    else:
+                        offset = int.from_bytes(request[6:8], "little")
+                        device.read_queue.append(
+                            response(
+                                request,
+                                offset=offset + request[5],
+                                total=length,
+                            )
+                        )
+
+                client, _ = self.make_client(reply, retries=0)
+                client.upload_dynamic(b"x" * length)
+                self.assertEqual(expected_chunks, [request[5] for request in seen[2:]])
+                self.assertEqual(1, len({request[2] for request in seen[1:]}))
+                self.assertTrue(
+                    all(
+                        request[10 + request[5] :] == bytes(22 - request[5])
+                        for request in seen[1:]
+                    )
+                )
+
+    def test_dynamic_upload_explicit_ttl_wire_bytes(self):
+        seen = []
+
+        def reply(device, wire):
+            request = wire[1:]
+            seen.append(request)
+            if request[1] == cli.OPCODE_CAPABILITIES:
+                device.read_queue.append(
+                    response(
+                        request,
+                        payload=dynamic_capabilities_payload(),
+                        total=22,
+                    )
+                )
+            elif request[1] == cli.OPCODE_DYNAMIC_BEGIN:
+                self.assertEqual(b"X\x02\x00\x00", request[10:14])
+                device.read_queue.append(response(request, total=1))
+            else:
+                device.read_queue.append(response(request, offset=1, total=1))
+
+        client, _ = self.make_client(reply, retries=0)
+        client.upload_dynamic(b"Z", ttl_seconds=600)
+        self.assertEqual(
+            [cli.OPCODE_CAPABILITIES, cli.OPCODE_DYNAMIC_BEGIN, cli.OPCODE_DYNAMIC_DATA],
+            [request[1] for request in seen],
+        )
+        self.assertEqual(1, len({request[2] for request in seen[1:]}))
+
+    def test_dynamic_input_validation_happens_before_any_hid_write(self):
+        cases = (
+            (b"", None),
+            (b"x" * 257, None),
+            (b"\x00", None),
+            (b"x", 0),
+            (b"x", 86401),
+        )
+        for data, ttl in cases:
+            with self.subTest(length=len(data), ttl=ttl):
+                client, device = self.make_client(retries=0)
+                with self.assertRaises(ValueError):
+                    client.upload_dynamic(data, ttl_seconds=ttl)
+                self.assertEqual([], device.writes)
+
+    def test_dynamic_upload_timeout_restarts_from_begin_with_new_request_id(self):
+        seen = []
+
+        def reply(device, wire):
+            request = wire[1:]
+            seen.append(request)
+            if request[1] == cli.OPCODE_CAPABILITIES:
+                device.read_queue.append(
+                    response(
+                        request,
+                        payload=dynamic_capabilities_payload(),
+                        total=22,
+                    )
+                )
+            elif request[1] == cli.OPCODE_DYNAMIC_BEGIN:
+                device.read_queue.append(response(request, total=1))
+            elif request[2] != 1:
+                device.read_queue.append(response(request, offset=1, total=1))
+            # The first DATA request is intentionally left unanswered.
+
+        client, _ = self.make_client(reply, retries=1)
+        client.upload_dynamic(b"x")
+        self.assertEqual(
+            [
+                (cli.OPCODE_CAPABILITIES, 0),
+                (cli.OPCODE_DYNAMIC_BEGIN, 1),
+                (cli.OPCODE_DYNAMIC_DATA, 1),
+                (cli.OPCODE_DYNAMIC_BEGIN, 2),
+                (cli.OPCODE_DYNAMIC_DATA, 2),
+            ],
+            [(request[1], request[2]) for request in seen],
+        )
+
+    def test_dynamic_upload_bad_offset_restarts_with_new_request_id(self):
+        seen = []
+
+        def reply(device, wire):
+            request = wire[1:]
+            seen.append(request)
+            if request[1] == cli.OPCODE_CAPABILITIES:
+                device.read_queue.append(
+                    response(
+                        request,
+                        payload=dynamic_capabilities_payload(),
+                        total=22,
+                    )
+                )
+            elif request[1] == cli.OPCODE_DYNAMIC_BEGIN:
+                device.read_queue.append(response(request, total=1))
+            elif request[2] == 1:
+                device.read_queue.append(response(request, status=cli.STATUS_BAD_OFFSET))
+            else:
+                device.read_queue.append(response(request, offset=1, total=1))
+
+        client, _ = self.make_client(reply, retries=1)
+        client.upload_dynamic(b"x")
+        self.assertEqual(
+            [
+                (cli.OPCODE_CAPABILITIES, 0),
+                (cli.OPCODE_DYNAMIC_BEGIN, 1),
+                (cli.OPCODE_DYNAMIC_DATA, 1),
+                (cli.OPCODE_DYNAMIC_BEGIN, 2),
+                (cli.OPCODE_DYNAMIC_DATA, 2),
+            ],
+            [(request[1], request[2]) for request in seen],
+        )
+
+    def test_dynamic_clear_discovers_capability_and_retries_idempotently(self):
+        seen = []
+
+        def reply(device, wire):
+            request = wire[1:]
+            seen.append(request)
+            if request[1] == cli.OPCODE_CAPABILITIES:
+                device.read_queue.append(
+                    response(
+                        request,
+                        payload=dynamic_capabilities_payload(),
+                        total=22,
+                    )
+                )
+            elif request[2] != 1:
+                device.read_queue.append(response(request))
+
+        client, _ = self.make_client(reply, retries=1)
+        client.clear_dynamic()
+        self.assertEqual(
+            [
+                (cli.OPCODE_CAPABILITIES, 0),
+                (cli.OPCODE_DYNAMIC_CLEAR, 1),
+                (cli.OPCODE_DYNAMIC_CLEAR, 2),
+            ],
+            [(request[1], request[2]) for request in seen],
+        )
+
+    def test_dynamic_upload_does_not_authenticate_protected_device(self):
+        seen = []
+
+        def reply(device, wire):
+            request = wire[1:]
+            seen.append(request)
+            if request[1] == cli.OPCODE_CAPABILITIES:
+                device.read_queue.append(
+                    response(
+                        request,
+                        payload=dynamic_capabilities_payload(),
+                        total=22,
+                    )
+                )
+            elif request[1] == cli.OPCODE_DYNAMIC_BEGIN:
+                device.read_queue.append(response(request, total=1))
+            elif request[1] == cli.OPCODE_DYNAMIC_DATA:
+                device.read_queue.append(response(request, offset=1, total=1))
+
+        client, _ = self.make_client(reply, retries=0)
+        client.upload_dynamic(b"x")
+        self.assertEqual(
+            [cli.OPCODE_CAPABILITIES, cli.OPCODE_DYNAMIC_BEGIN, cli.OPCODE_DYNAMIC_DATA],
+            [request[1] for request in seen],
+        )
+        self.assertNotIn(cli.OPCODE_AUTH_INFO, [request[1] for request in seen])
+        self.assertNotIn(cli.OPCODE_AUTH_CHALLENGE, [request[1] for request in seen])
+        self.assertNotIn(cli.OPCODE_AUTH_PROVE, [request[1] for request in seen])
+
+
 class CliTests(unittest.TestCase):
+    def test_cli_parses_dynamic_commands_and_ttl(self):
+        args = cli.make_parser().parse_args(
+            ["dynamic-set", "--text", "hello", "--ttl", "600"]
+        )
+        self.assertEqual("dynamic-set", args.command)
+        self.assertEqual("hello", args.text)
+        self.assertEqual(600, args.ttl)
+        self.assertEqual(
+            "capabilities", cli.make_parser().parse_args(["capabilities"]).command
+        )
+        self.assertEqual(
+            "dynamic-clear", cli.make_parser().parse_args(["dynamic-clear"]).command
+        )
+
     def test_cli_parses_decimal_and_hex_vid_pid(self):
         args = cli.make_parser().parse_args(
             ["--vid", "4660", "--pid", "0x5678", "list"]
@@ -1150,6 +1446,21 @@ class CliTests(unittest.TestCase):
             )
         self.assertEqual(1, result)
         self.assertIn("0x00", err.getvalue())
+
+    def test_cli_dynamic_invalid_input_sends_no_hid_write(self):
+        for argv in (
+            ["dynamic-set", "--text", "x", "--ttl", "0"],
+            ["dynamic-set", "--text", "bad\x00"],
+        ):
+            with self.subTest(argv=argv):
+                device = FakeDevice()
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    result = cli.main(
+                        argv, hid_module=FakeHid([record()], device)
+                    )
+                self.assertEqual(1, result)
+                self.assertEqual([], device.writes)
 
     def test_cli_list_output_filters_vid_pid_and_closes(self):
         def reply(device, wire):

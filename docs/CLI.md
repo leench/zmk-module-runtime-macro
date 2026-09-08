@@ -10,6 +10,7 @@
 - `OPEN`：没有凭据。`list`、`get`、`set`、`clear` 可以直接使用，也可以一直不设置密码。
 - `PROTECTED`：设置非空密码后，以上四个宏管理命令必须先 `login`。
 - `set-password` 在 `OPEN` 可直接首次设置；在 `PROTECTED` 必须已有有效登录窗口。
+- `dynamic-set`、`dynamic-clear` 和 `capabilities` 不要求先 `login`，也不改变上述认证状态。
 - 客户端使用 `AUTH_INFO -> AUTH_CHALLENGE -> AUTH_PROVE` challenge-response，不传输原始密码。
 - 密码经过 Unicode NFC 后以 UTF-8 编码，使用 PBKDF2-HMAC-SHA256 派生 32-byte key；proof 是
   `HMAC-SHA256("ZMK-RUNTIME-MACRO-AUTH-V2" || nonce)` 的前 16 bytes。
@@ -19,6 +20,11 @@
 - 客户端不保存密码或派生 key，不使用命令行参数、普通环境变量、普通配置文件或日志传递凭据。
   GUI/后台应用也应遵循 [`AUTHENTICATION_PROTOCOL.md`](AUTHENTICATION_PROTOCOL.md) 的凭据存储要求。
 - 认证不加密 USB 流量；密码配置保护管理操作，不保护按键触发时的键盘输出。
+- dynamic macro 的 `CAPABILITIES`、`DYNAMIC_BEGIN`、`DYNAMIC_DATA`、`DYNAMIC_CLEAR`
+  不经过 static slot 的 password gate；这些操作不会自动登录，也不会刷新已有认证窗口。dynamic
+  object 只在 RAM 中存在、没有 readback，成功执行一次后消费，并受 TTL 约束。
+- dynamic channel 只应由客户端用于非-secret 文本。这是产品和客户端使用约束，不是固件能够验证的
+  语义安全保证；不要上传密码、OTP、token、密钥或其他秘密。
 
 ## 安装
 
@@ -108,6 +114,44 @@ python3 tools/runtime_macro_cli.py lock
 
 `LOCK` 是幂等操作，传输超时时可以用新的 request ID 重试。
 
+### `capabilities`
+
+探测 dynamic macro v1 能力和 lifecycle flags：
+
+```sh
+python3 tools/runtime_macro_cli.py capabilities
+```
+
+客户端会严格校验 capability version、对象数量、最大长度、TTL 边界、transaction timeout 和保留
+flags。固件返回 `BAD_OPCODE` 时会明确报告不支持 dynamic macro；不会降级为 static `set`。
+
+### `dynamic-set`
+
+上传一个临时 dynamic macro。三种输入方式互斥，和 static `set` 一致：
+
+```sh
+python3 tools/runtime_macro_cli.py dynamic-set --text 'Hello'
+printf 'A\tB\n' | python3 tools/runtime_macro_cli.py dynamic-set --stdin
+python3 tools/runtime_macro_cli.py dynamic-set --file dynamic.txt --ttl 600
+```
+
+客户端在任何 HID write 前检查 1..256 bytes、允许的 ASCII/control bytes 和 TTL `1..86400`。
+未指定 `--ttl` 时使用固件默认值 300 秒。客户端先读取 capabilities，再以 22-byte payload 分块发送
+`DYNAMIC_BEGIN`/`DYNAMIC_DATA`；BEGIN 和全部 DATA 使用同一 request ID。传输超时、`BAD_REQUEST` 或
+`BAD_OFFSET` 会用新的 request ID 从 BEGIN 重启整个上传；不会自动登录，也不会退回 static `set`。
+成功上传不会提供 dynamic text readback。
+
+### `dynamic-clear`
+
+清除 dynamic object：
+
+```sh
+python3 tools/runtime_macro_cli.py dynamic-clear
+```
+
+客户端先探测 capabilities，再发送幂等的 `DYNAMIC_CLEAR`。可恢复传输失败使用新的 request ID
+重试；不影响 static slot、密码或当前认证状态机。
+
 ### `list`
 
 列出 slots 及其当前文本长度：
@@ -160,6 +204,9 @@ python3 tools/runtime_macro_cli.py set 2 --file slot-2.txt
 `set` 会先在客户端校验输入，再按协议的 22-byte payload 分块发送。传输超时或事务状态错误
 会以新的 request ID 从 offset `0` 重新开始；设备不会在完整 SET 事务完成前改变 slot。
 
+`dynamic-set` 使用相同的 22-byte 分块大小，但上限固定为 256 bytes，并且 dynamic BEGIN 的 TTL
+payload 是可选的 4-byte little-endian seconds；它与 static `set` 完全不是同一个 slot 或持久化路径。
+
 ### `clear SLOT`
 
 清空一个 slot：
@@ -177,8 +224,9 @@ python3 tools/runtime_macro_cli.py clear 0
 - Tab：`0x09`；
 - Backspace：`0x08`。
 
-不允许 NUL、DEL、UTF-8 多字节字符、中文、Emoji 或其他 Unicode。最大长度由固件的
-`CONFIG_ZMK_RUNTIME_MACRO_MAX_TEXT_LEN` 决定，默认是 64 bytes。
+不允许 NUL、DEL、UTF-8 多字节字符、中文、Emoji 或其他 Unicode。static slot 最大长度由固件的
+`CONFIG_ZMK_RUNTIME_MACRO_MAX_TEXT_LEN` 决定，默认是 64 bytes；dynamic object 第一版固定为
+1..256 bytes，保存在 RAM 中，不写 Settings/NVS。
 
 宏按 US 键盘 usage 执行，而不是发送字符流；主机键盘布局可能影响标点最终产生的字符。
 
@@ -238,6 +286,9 @@ try:
     text = client.get_slot(0)       # bytes
     client.set_slot(0, b"Hello\n")
     client.clear_slot(0)
+    capabilities = client.get_capabilities()  # DynamicCapabilities
+    client.upload_dynamic(b"Hello\n", ttl_seconds=600)
+    client.clear_dynamic()
     client.lock()
 finally:
     transport.close()
@@ -266,6 +317,15 @@ RuntimeMacroClient(
 | `get_slot(slot)` | `bytes` | 获取一个 slot 的 ASCII/control bytes |
 | `set_slot(slot, data)` | `None` | 校验并原子替换一个 slot |
 | `clear_slot(slot)` | `None` | 清空并删除一个 slot |
+| `get_capabilities()` | `DynamicCapabilities` | 严格读取 dynamic macro v1 能力；不读取文本 |
+| `upload_dynamic(data, ttl_seconds=None)` | `None` | 校验、分块、原子上传临时 dynamic object |
+| `clear_dynamic()` | `None` | 探测能力后幂等清除 dynamic object |
+
+`DynamicCapabilities` 是 frozen dataclass，包含 `capability_version`、`dynamic_object_count`、
+`lifecycle_flags`、`max_dynamic_length`、`default_ttl_seconds`、`min_ttl_seconds`、
+`max_ttl_seconds` 和 `transaction_timeout_seconds`。它还提供 `clear_on_usb_disconnect`、
+`clear_on_ble_profile_change`、`clear_on_selected_endpoint_change` 三个布尔属性。当前 v1
+固定为一个最大 256 bytes 的 RAM-only object；客户端不会增加 `get_dynamic()` API。
 
 `AuthInfo` 是 frozen dataclass，包含：
 
@@ -321,10 +381,12 @@ open_transport(hid_module, *, path=None, vid=None, pid=None, clock=...) -> HidTr
 
 ## Wire interface
 
-Python 客户端使用的是当前 v2 固定帧协议。宏命令沿用 `LIST`、`GET`、`SET`、`CLEAR` 的分页和事务
-布局，认证使用 `AUTH_INFO`、`AUTH_CHALLENGE`、`AUTH_PROVE`、`PASSWORD_SET`、`LOCK`。
-详细字段、状态码、分页、SET 事务和 USB HID descriptor 见 [`PROTOCOL.md`](PROTOCOL.md) 与
-[`AUTHENTICATION_PROTOCOL.md`](AUTHENTICATION_PROTOCOL.md)。固件侧 C API 见：
+Python 客户端使用的是当前 v2 固定帧协议。宏命令沿用 `LIST`、`GET`、`SET`、`CLEAR` 的分页和事务布局，认证使用 `AUTH_INFO`、
+`AUTH_CHALLENGE`、`AUTH_PROVE`、`PASSWORD_SET`、`LOCK`；dynamic 使用 `CAPABILITIES`、
+`DYNAMIC_BEGIN`、`DYNAMIC_DATA`、`DYNAMIC_CLEAR`。详细 dynamic 字段、状态码、事务、lifecycle
+flags 和 USB HID descriptor 见 [`DYNAMIC_PROTOCOL.md`](DYNAMIC_PROTOCOL.md)；通用字段见
+[`PROTOCOL.md`](PROTOCOL.md)，认证见 [`AUTHENTICATION_PROTOCOL.md`](AUTHENTICATION_PROTOCOL.md)。
+固件侧 C API 见：
 
 - [`include/zmk/runtime_macro.h`](../include/zmk/runtime_macro.h)
 - [`include/zmk/runtime_macro_protocol.h`](../include/zmk/runtime_macro_protocol.h)

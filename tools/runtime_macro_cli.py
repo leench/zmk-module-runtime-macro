@@ -71,6 +71,10 @@ OPCODE_AUTH_CHALLENGE = 0x11
 OPCODE_AUTH_PROVE = 0x12
 OPCODE_PASSWORD_SET = 0x13
 OPCODE_LOCK = 0x14
+OPCODE_DYNAMIC_BEGIN = 0x20
+OPCODE_DYNAMIC_DATA = 0x21
+OPCODE_DYNAMIC_CLEAR = 0x22
+OPCODE_CAPABILITIES = 0x23
 
 STATUS_OK = 0
 STATUS_BAD_VERSION = 1
@@ -88,6 +92,27 @@ STATUS_AUTH_NOT_CONFIGURED = 12
 STATUS_RATE_LIMITED = 13
 STATUS_AUTH_NO_CHALLENGE = 14
 STATUS_CREDENTIAL_INVALID = 15
+
+DYNAMIC_CAPABILITY_VERSION = 1
+DYNAMIC_OBJECT_COUNT = 1
+DYNAMIC_MAX_LENGTH = 256
+DYNAMIC_DEFAULT_TTL_SECONDS = 300
+DYNAMIC_MIN_TTL_SECONDS = 1
+DYNAMIC_MAX_TTL_SECONDS = 86400
+DYNAMIC_TRANSACTION_TIMEOUT_SECONDS = 30
+DYNAMIC_LIFECYCLE_CLEAR_ON_BOOT = 1 << 0
+DYNAMIC_LIFECYCLE_CLEAR_ON_TTL_EXPIRY = 1 << 1
+DYNAMIC_LIFECYCLE_CLEAR_ON_EXECUTION_ACCEPT = 1 << 2
+DYNAMIC_LIFECYCLE_CLEAR_ON_USB_DISCONNECT = 1 << 3
+DYNAMIC_LIFECYCLE_CLEAR_ON_BLE_PROFILE_CHANGE = 1 << 4
+DYNAMIC_LIFECYCLE_CLEAR_ON_SELECTED_ENDPOINT_CHANGE = 1 << 5
+DYNAMIC_LIFECYCLE_KNOWN_MASK = 0x003F
+DYNAMIC_LIFECYCLE_REQUIRED_MASK = (
+    DYNAMIC_LIFECYCLE_CLEAR_ON_BOOT
+    | DYNAMIC_LIFECYCLE_CLEAR_ON_TTL_EXPIRY
+    | DYNAMIC_LIFECYCLE_CLEAR_ON_EXECUTION_ACCEPT
+)
+DYNAMIC_CAPABILITIES_SIZE = 22
 
 STATUS_NAMES = {
     STATUS_OK: "OK",
@@ -142,6 +167,14 @@ class LegacyFirmwareError(RemoteError):
     def __init__(self):
         super().__init__(STATUS_BAD_VERSION)
         self.args = ("固件仍是 v1 或不支持 v2 认证协议，请升级固件后再试；客户端不会自动回退到 v1",)
+
+
+class DynamicUnsupportedError(RemoteError):
+    """The v2 firmware does not implement the dynamic macro capability."""
+
+    def __init__(self):
+        super().__init__(STATUS_BAD_OPCODE)
+        self.args = ("固件不支持 dynamic macro capability，请升级固件后再试；客户端不会降级为 static SET",)
 
 
 class PasswordSetUnconfirmed(ProtocolError):
@@ -433,6 +466,34 @@ class AuthInfo:
 
 
 @dataclass(frozen=True)
+class DynamicCapabilities:
+    """Validated dynamic-macro capability metadata."""
+
+    capability_version: int
+    dynamic_object_count: int
+    lifecycle_flags: int
+    max_dynamic_length: int
+    default_ttl_seconds: int
+    min_ttl_seconds: int
+    max_ttl_seconds: int
+    transaction_timeout_seconds: int
+
+    @property
+    def clear_on_usb_disconnect(self) -> bool:
+        return bool(self.lifecycle_flags & DYNAMIC_LIFECYCLE_CLEAR_ON_USB_DISCONNECT)
+
+    @property
+    def clear_on_ble_profile_change(self) -> bool:
+        return bool(self.lifecycle_flags & DYNAMIC_LIFECYCLE_CLEAR_ON_BLE_PROFILE_CHANGE)
+
+    @property
+    def clear_on_selected_endpoint_change(self) -> bool:
+        return bool(
+            self.lifecycle_flags & DYNAMIC_LIFECYCLE_CLEAR_ON_SELECTED_ENDPOINT_CHANGE
+        )
+
+
+@dataclass(frozen=True)
 class _PasswordSetTimeout(Exception):
     error: TransportError
     final_chunk: bool
@@ -552,6 +613,162 @@ class RuntimeMacroClient:
             raise ProtocolError(f"{operation} acknowledgement offset is incorrect")
         if u16(response, TOTAL_LENGTH_OFFSET) != total:
             raise ProtocolError(f"{operation} acknowledgement total length is incorrect")
+
+    def _dynamic_capabilities_once(self) -> DynamicCapabilities:
+        request = build_frame(
+            OPCODE_CAPABILITIES, self._request_id(), LIST_SLOT
+        )
+        try:
+            response = self._call(request)
+        except RemoteError as exc:
+            if exc.status == STATUS_BAD_OPCODE:
+                raise DynamicUnsupportedError() from exc
+            raise
+
+        payload_length = response[PAYLOAD_LENGTH_OFFSET]
+        if (
+            payload_length != DYNAMIC_CAPABILITIES_SIZE
+            or u16(response, OFFSET_OFFSET) != 0
+            or u16(response, TOTAL_LENGTH_OFFSET) != DYNAMIC_CAPABILITIES_SIZE
+        ):
+            raise ProtocolError("CAPABILITIES response has invalid length or metadata")
+
+        payload = response[PAYLOAD_OFFSET : PAYLOAD_OFFSET + DYNAMIC_CAPABILITIES_SIZE]
+        lifecycle_flags = int.from_bytes(payload[2:4], "little")
+        values = {
+            "capability_version": payload[0],
+            "dynamic_object_count": payload[1],
+            "lifecycle_flags": lifecycle_flags,
+            "max_dynamic_length": int.from_bytes(payload[4:6], "little"),
+            "default_ttl_seconds": int.from_bytes(payload[6:10], "little"),
+            "min_ttl_seconds": int.from_bytes(payload[10:14], "little"),
+            "max_ttl_seconds": int.from_bytes(payload[14:18], "little"),
+            "transaction_timeout_seconds": int.from_bytes(payload[18:22], "little"),
+        }
+        if values["capability_version"] != DYNAMIC_CAPABILITY_VERSION:
+            raise ProtocolError("CAPABILITIES response has an unknown capability version")
+        if values["dynamic_object_count"] != DYNAMIC_OBJECT_COUNT:
+            raise ProtocolError("CAPABILITIES response has an invalid object count")
+        if lifecycle_flags & ~DYNAMIC_LIFECYCLE_KNOWN_MASK:
+            raise ProtocolError("CAPABILITIES response contains reserved lifecycle flags")
+        if lifecycle_flags & DYNAMIC_LIFECYCLE_REQUIRED_MASK != DYNAMIC_LIFECYCLE_REQUIRED_MASK:
+            raise ProtocolError("CAPABILITIES response disables a required lifecycle flag")
+        for field, expected in (
+            ("max_dynamic_length", DYNAMIC_MAX_LENGTH),
+            ("default_ttl_seconds", DYNAMIC_DEFAULT_TTL_SECONDS),
+            ("min_ttl_seconds", DYNAMIC_MIN_TTL_SECONDS),
+            ("max_ttl_seconds", DYNAMIC_MAX_TTL_SECONDS),
+            ("transaction_timeout_seconds", DYNAMIC_TRANSACTION_TIMEOUT_SECONDS),
+        ):
+            if values[field] != expected:
+                raise ProtocolError(
+                    f"CAPABILITIES response has invalid {field}: {values[field]}"
+                )
+        return DynamicCapabilities(**values)
+
+    def get_capabilities(self) -> DynamicCapabilities:
+        """Discover and strictly validate dynamic-macro capability metadata."""
+        return self._retry_call(self._dynamic_capabilities_once)
+
+    @staticmethod
+    def _validate_dynamic_input(data: bytes, ttl_seconds: int | None) -> bytes:
+        data = bytes(data)
+        if not 1 <= len(data) <= DYNAMIC_MAX_LENGTH:
+            raise ValueError(
+                f"dynamic text length must be between 1 and {DYNAMIC_MAX_LENGTH} bytes"
+            )
+        validate_ascii(data)
+        if ttl_seconds is not None and not (
+            DYNAMIC_MIN_TTL_SECONDS <= ttl_seconds <= DYNAMIC_MAX_TTL_SECONDS
+        ):
+            raise ValueError(
+                f"dynamic TTL must be between {DYNAMIC_MIN_TTL_SECONDS} and "
+                f"{DYNAMIC_MAX_TTL_SECONDS} seconds"
+            )
+        return data
+
+    def _upload_dynamic_once(
+        self, data: bytes, ttl_seconds: int | None, request_id: int
+    ) -> None:
+        ttl_payload = (
+            b""
+            if ttl_seconds is None
+            else ttl_seconds.to_bytes(4, "little")
+        )
+        begin = build_frame(
+            OPCODE_DYNAMIC_BEGIN,
+            request_id,
+            LIST_SLOT,
+            payload=ttl_payload,
+            offset=0,
+            total_length=len(data),
+        )
+        response = self._call(begin)
+        self._validate_chunk_ack(response, "DYNAMIC_BEGIN", 0, len(data))
+
+        for offset in range(0, len(data), PAYLOAD_SIZE):
+            chunk = data[offset : offset + PAYLOAD_SIZE]
+            request = build_frame(
+                OPCODE_DYNAMIC_DATA,
+                request_id,
+                LIST_SLOT,
+                payload=chunk,
+                offset=offset,
+                total_length=len(data),
+            )
+            response = self._call(request)
+            self._validate_chunk_ack(
+                response, "DYNAMIC_DATA", offset + len(chunk), len(data)
+            )
+
+    def upload_dynamic(self, data: bytes, ttl_seconds: int | None = None) -> None:
+        """Upload dynamic text atomically without exposing a readback API."""
+        data = self._validate_dynamic_input(data, ttl_seconds)
+        capabilities = self.get_capabilities()
+        if len(data) > capabilities.max_dynamic_length:
+            raise ValueError(
+                f"dynamic text exceeds firmware limit of {capabilities.max_dynamic_length} bytes"
+            )
+        if ttl_seconds is not None and not (
+            capabilities.min_ttl_seconds
+            <= ttl_seconds
+            <= capabilities.max_ttl_seconds
+        ):
+            raise ValueError(
+                f"dynamic TTL must be between {capabilities.min_ttl_seconds} and "
+                f"{capabilities.max_ttl_seconds} seconds"
+            )
+
+        last: Exception | None = None
+        for attempt in range(self.retries + 1):
+            request_id = self._request_id()
+            try:
+                self._upload_dynamic_once(data, ttl_seconds, request_id)
+                return
+            except (TimeoutError, TransportError) as exc:
+                last = exc
+            except RemoteError as exc:
+                if exc.status not in (STATUS_BAD_REQUEST, STATUS_BAD_OFFSET):
+                    raise
+                last = exc
+            except ProtocolError:
+                raise
+            if attempt == self.retries:
+                assert last is not None
+                raise last
+        raise AssertionError("unreachable")
+
+    def _clear_dynamic_once(self) -> None:
+        request = build_frame(
+            OPCODE_DYNAMIC_CLEAR, self._request_id(), LIST_SLOT
+        )
+        response = self._call(request)
+        self._validate_empty_ack(response, "DYNAMIC_CLEAR")
+
+    def clear_dynamic(self) -> None:
+        """Clear dynamic text after capability discovery; the operation is idempotent."""
+        self.get_capabilities()
+        self._retry_call(self._clear_dynamic_once)
 
     def _auth_info_once(self) -> AuthInfo:
         request = build_frame(OPCODE_AUTH_INFO, self._request_id(), LIST_SLOT)
@@ -927,6 +1144,14 @@ def make_parser() -> argparse.ArgumentParser:
     sub.add_parser("login", help="authenticate with the configured password")
     sub.add_parser("set-password", help="set or replace the management password")
     sub.add_parser("lock", help="close the current management session")
+    sub.add_parser("capabilities", help="show dynamic macro capabilities")
+    dynamic_set = sub.add_parser("dynamic-set", help="upload a temporary dynamic macro")
+    dynamic_inputs = dynamic_set.add_mutually_exclusive_group(required=True)
+    dynamic_inputs.add_argument("--text")
+    dynamic_inputs.add_argument("--file", type=Path)
+    dynamic_inputs.add_argument("--stdin", action="store_true")
+    dynamic_set.add_argument("--ttl", type=parse_int, help="TTL in seconds (1..86400)")
+    sub.add_parser("dynamic-clear", help="clear the temporary dynamic macro")
     return parser
 
 
@@ -993,7 +1218,7 @@ def main(argv: list[str] | None = None, *, hid_module: Any = None) -> int:
     if args.timeout_ms < 1 or args.retries < 0:
         parser.error("--timeout-ms 必须为正数，--retries 不能为负数")
     try:
-        if args.command == "set":
+        if args.command in ("set", "dynamic-set"):
             data = _read_set_data(args)
         else:
             data = None
@@ -1048,6 +1273,28 @@ def main(argv: list[str] | None = None, *, hid_module: Any = None) -> int:
             elif args.command == "lock":
                 client.lock()
                 print("locked")
+            elif args.command == "capabilities":
+                capabilities = client.get_capabilities()
+                print(
+                    f"capability_version={capabilities.capability_version} "
+                    f"dynamic_object_count={capabilities.dynamic_object_count} "
+                    f"lifecycle_flags=0x{capabilities.lifecycle_flags:04x} "
+                    f"max_length={capabilities.max_dynamic_length} "
+                    f"default_ttl={capabilities.default_ttl_seconds} "
+                    f"min_ttl={capabilities.min_ttl_seconds} "
+                    f"max_ttl={capabilities.max_ttl_seconds} "
+                    f"transaction_timeout={capabilities.transaction_timeout_seconds}"
+                )
+            elif args.command == "dynamic-set":
+                assert data is not None
+                client.upload_dynamic(data, ttl_seconds=args.ttl)
+                ttl = (
+                    DYNAMIC_DEFAULT_TTL_SECONDS if args.ttl is None else args.ttl
+                )
+                print(f"dynamic macro uploaded ({len(data)} bytes, ttl={ttl}s)")
+            elif args.command == "dynamic-clear":
+                client.clear_dynamic()
+                print("dynamic macro cleared")
         return 0
     except (RuntimeMacroError, ValueError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
