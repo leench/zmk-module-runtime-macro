@@ -308,6 +308,26 @@ static bool
 runtime_macro_protocol_set_payload_is_valid(const uint8_t *request,
                                             uint8_t payload_length);
 
+static uint16_t runtime_macro_protocol_dynamic_lifecycle_flags(void) {
+  uint16_t flags =
+      ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_FIXED_LIFECYCLE_FLAGS;
+
+#if defined(CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_USB_DISCONNECT) && \
+    CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_USB_DISCONNECT
+  flags |= ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_CLEAR_ON_USB_DISCONNECT;
+#endif
+#if defined(CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_BLE_PROFILE_CHANGE) && \
+    CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_BLE_PROFILE_CHANGE
+  flags |= ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_CLEAR_ON_BLE_PROFILE_CHANGE;
+#endif
+#if defined(CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_ENDPOINT_CHANGE) && \
+    CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_ENDPOINT_CHANGE
+  flags |= ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_CLEAR_ON_ENDPOINT_CHANGE;
+#endif
+
+  return flags;
+}
+
 static int runtime_macro_protocol_process_capabilities(const uint8_t *request,
                                                        uint8_t *response) {
   if (request[ZMK_RUNTIME_MACRO_PROTOCOL_SLOT_OFFSET] !=
@@ -325,11 +345,12 @@ static int runtime_macro_protocol_process_capabilities(const uint8_t *request,
 
   uint8_t *payload =
       response + ZMK_RUNTIME_MACRO_PROTOCOL_PAYLOAD_OFFSET;
+  const uint16_t lifecycle_flags =
+      runtime_macro_protocol_dynamic_lifecycle_flags();
   payload[0] = ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_VERSION;
   payload[1] = ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_OBJECT_COUNT;
-  payload[2] = (uint8_t)ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_LIFECYCLE_FLAGS;
-  payload[3] = (uint8_t)(ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_LIFECYCLE_FLAGS >>
-                         8);
+  payload[2] = (uint8_t)lifecycle_flags;
+  payload[3] = (uint8_t)(lifecycle_flags >> 8);
   payload[4] = (uint8_t)ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_MAX_LENGTH;
   payload[5] = (uint8_t)(ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_MAX_LENGTH >> 8);
   runtime_macro_protocol_put_u32(

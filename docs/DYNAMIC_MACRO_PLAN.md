@@ -4,7 +4,7 @@
 
 本文把 [`PLAN.md`](PLAN.md) 中已经确认的 RAM-only dynamic macro 产品方向拆分为可独立评审、实现、验证和提交的阶段。
 
-本文是**实施计划**，不是当前功能说明，也不是最终 wire protocol 契约。动态宏尚未实现。正式开发前必须先完成第 0 阶段并冻结 wire-level 细节。
+本文是**实施计划**，不是当前功能说明，也不是最终 wire protocol 契约。Phase 0 已冻结，当前实现进度与阶段门禁记录在本文各阶段完成记录中。
 
 文档关系：
 
@@ -790,50 +790,103 @@ protocol 中加入 client、readback 或额外认证。
 
 把 committed/staging clear 接入真实生命周期边界，同时避免复用认证的“保守 reset”策略造成误清。
 
-### 11.2 Kconfig 建议
+### 11.2 Kconfig 最终定义
 
-最终名称在阶段 0 冻结，至少表达：
+Phase 0 的生命周期决策已落实为三个独立选项：
 
-- clear on actual management USB disconnect：默认 `y`；
-- clear on selected endpoint change：默认 `n`；
-- clear on active BLE profile change：默认 `n`。
+- `CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_USB_DISCONNECT`：默认 `y`，依赖
+  `CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC`；
+- `CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_BLE_PROFILE_CHANGE`：默认 `n`，依赖
+  dynamic 和 `CONFIG_ZMK_BLE`；
+- `CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_ENDPOINT_CHANGE`：默认 `n`，依赖
+  dynamic。
 
-若把后两项合并成一个 output-change policy，也必须在 help 和文档中说明它实际订阅哪些 ZMK events。
+dynamic 仍是显式 opt-in 且依赖 management USB HID；这些 policy 不会反向启用
+USB。CAPABILITIES 的 lifecycle flags 与实际 Kconfig 条件一致，BLE flag 额外受
+`CONFIG_ZMK_BLE` 门控。BLE/profile 与 endpoint listener 源文件仅在相应可选 policy
+启用时编译。
 
 ### 11.3 USB 规则
 
-- 每个 USB connection notification 仍可重置 auth/protocol/queue；
-- dynamic committed clear 只能在“actual disconnect”判定成立且选项启用时发生；
-- `RESET/CONFIGURED/SUSPEND/RESUME/UNKNOWN/ERROR` 不因认证 reset 自动清 committed text；
-- stale generation request 不得在 disconnect 后 commit；
-- clear 与 transport mutex/dynamic mutex 的锁顺序必须固定，避免 deadlock；
-- host OS shutdown 不承诺被识别为 disconnect。
+- 每个 USB connection notification 仍重置 auth/protocol/queue；这与 committed
+  dynamic clear 是两条独立路径；
+- 只有 raw USB status 在处理前后稳定且为 `USB_DC_DISCONNECTED`，并且 event state
+  与 raw-status mapping 一致（`ZMK_USB_CONN_NONE`）时，默认 policy 才清 committed
+  和 staging；
+- `RESET/CONFIGURED/SUSPEND/RESUME/UNKNOWN/ERROR` 不因 transport/auth reset
+  自动清 committed text；
+- reset 时先在 transport mutex 下置 offline、增加 generation、重置 auth、discard
+  protocol、purge queue，再执行 dynamic clear；因此并发旧 generation 的 final DATA
+  不得在真实 disconnect 后 commit；
+- stale event/raw status 不重新发布 HID，endpoint ownership recovery 与 committed
+  clear 也保持在同一 transport boundary 内；
+- host OS shutdown 不承诺一定被识别为 disconnect。
 
 ### 11.4 Bluetooth/output 规则
 
-- 默认不订阅或不执行 clear，保证 USB host A 上传后可切到 BLE host B；
-- profile clear 使用 `zmk_ble_active_profile_changed`；
-- output clear 若使用 `zmk_endpoint_changed`，文档必须称为 selected endpoint change；
-- 自动 fallback、BLE connect/disconnect 也可能改变 selected endpoint，启用该策略时应按实际 event clear；
+- 默认不订阅或不执行 clear，保证 USB host A 上传后切到 BLE host B 时仍可执行；
+- profile policy 使用 `zmk_ble_active_profile_changed`，只在显式启用且 `ZMK_BLE`
+  可用时订阅；
+- endpoint policy 使用 `zmk_endpoint_changed`，文档语义是 selected endpoint change，
+  不是 preferred output 写入；
+- 自动 fallback、BLE connect/disconnect 导致 selected endpoint 变化时，启用该 policy
+  即按实际 event clear；
 - 不修改 ZMK endpoint/output behavior 来制造新事件。
 
 ### 11.5 Tests
 
-- actual disconnect enabled/disabled；
-- reset、configured、suspend/resume、unknown/error 不误清；
-- auth reset 与 committed preservation；
+已覆盖：
+
+- actual disconnect policy on/off；
+- `RESET/CONFIGURED/SUSPEND/RESUME/UNKNOWN/ERROR` 不误清；
+- auth/transport reset 与 committed preservation；
 - disconnect 与 queued final DATA 的 generation race；
-- profile change enabled/disabled；
-- selected endpoint change enabled/disabled；
-- 默认 USB A → `BT_SEL`/`OUT_BLE` → BLE B 流程保留数据；
+- profile/selected endpoint policy 的 on/off 行为及默认保留；
+- USB host A → BLE/output 切换时保留 dynamic data；
 - lifecycle clear 不影响 static slots 或 credential；
-- 所有 clear 路径 zeroize。
+- committed/staging clear 路径 zeroize；
+- 无 BLE 时 profile policy 被 Kconfig 阻止，capability header 不错误宣称 BLE flag；
+- 既有 static/auth/protocol/USB/dynamic host tests 全量回归。
 
 ### 11.6 完成标准
 
 - 认证 reset 和动态 clear 是两套可独立解释、独立测试的策略；
 - 默认配置支持跨设备转发用例；
-- 文档不把 suspend 或 host shutdown 描述成可靠 disconnect。
+- 文档不把 suspend、UNKNOWN、error 或 host shutdown 描述成可靠 disconnect；
+- off/on 目标固件和可选 policy 构建均通过。
+
+### 11.7 Phase 6 实际完成记录
+
+Phase 6 已完成。新增 `CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_USB_DISCONNECT`、
+`..._ON_BLE_PROFILE_CHANGE` 和 `..._ON_ENDPOINT_CHANGE`，并新增
+`src/runtime_macro_dynamic_lifecycle.c`。默认行为是实际 management USB disconnect
+清除 committed/staging；BLE profile 和 selected endpoint 变化默认保留。
+
+`src/runtime_macro_usb_hid.c` 现在在同一 transport mutex 下完成 offline、generation
+递增、auth/protocol reset、queue purge、稳定 raw USB status 与 event mapping 判断、
+endpoint recovery 和按 policy 的 dynamic clear。`src/runtime_macro_dynamic_lifecycle.c` 只在可选
+policy 开启时订阅 ZMK 的 `zmk_ble_active_profile_changed` 或 `zmk_endpoint_changed`。
+未修改 ZMK 主仓库、静态 slot、认证数据或 Python client；CAPABILITIES lifecycle
+flags 会按实际 policy 动态反映。
+
+#### Phase 6 验证记录
+
+- 容器内 `CLANG=gcc ./tests/host/run.sh`：GCC、sanitizer、替代编译器五轮全部通过，
+  包含 USB policy on/off、profile/endpoint 默认保留和无 BLE policy gate；
+- 当前完整 `leen-display` Totem 配置使用 `nice_nano//zmk`、`ZMK_EXTRA_MODULES`
+  完整路径和全新 pristine build，在 `zmk-dev` 中 off/on 均成功链接；仅有既有
+  `leen-display` 的 `ZMK_TRANSPORT_NONE` switch warning；
+
+| 构建 | Flash | RAM | map / config 关键状态 |
+|---|---:|---:|---|
+| Phase 6 off | 429632 B | 193294 B / 262144 B（73.74%） | dynamic config/source/state absent |
+| Phase 6 on，默认 policy | 431880 B | 194174 B / 262144 B（74.07%） | USB disconnect=y；profile/endpoint=n；dynamic state `0x228` |
+| profile+endpoint policy on | 431936 B | 194174 B / 262144 B（74.07%） | optional lifecycle source compiled successfully |
+
+相对 off，默认 dynamic on 增量为 Flash `+2248 B`、RAM `+880 B`，剩余 RAM 为
+`67970 B`。off map 没有 dynamic state；on map 有 `.bss.runtime_macro_dynamic_state`
+且 dynamic object 没有 Settings/NVS/static-slot 未解析依赖。所有改动未修改 ZMK 主仓库，
+当前工作区仍待主 agent 提交。
 
 ---
 

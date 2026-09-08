@@ -14,6 +14,7 @@
 #include <string.h>
 
 #include <zephyr/device.h>
+#include <zephyr/kernel.h>
 #include <zephyr/usb/class/hid.h>
 #include <zephyr/usb/class/usb_hid.h>
 
@@ -22,6 +23,10 @@
 #define CONFIG_SETTINGS 1
 #define CONFIG_ZMK_LOG_LEVEL 0
 #define CONFIG_ZMK_RUNTIME_MACRO_USB_HID 1
+#define CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC 1
+#ifndef CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_USB_DISCONNECT
+#define CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_USB_DISCONNECT 1
+#endif
 #define CONFIG_ZMK_RUNTIME_MACRO_AUTH_TEST 1
 #define ZMK_RUNTIME_MACRO_USB_HID_TEST 1
 #define CONFIG_ZMK_RUNTIME_MACRO_AUTH_CHALLENGE_TIMEOUT 30
@@ -66,6 +71,20 @@ int runtime_macro_auth_test_hmac(const uint8_t *key, const uint8_t *input,
   return 0;
 }
 
+int host_work_schedule(struct k_work_delayable *work, k_timeout_t delay,
+                       bool reschedule) {
+  (void)reschedule;
+  work->scheduled = true;
+  work->delay = delay;
+  return 0;
+}
+
+int zmk_runtime_macro_executor_start(const uint8_t *text, size_t length) {
+  (void)text;
+  (void)length;
+  return 0;
+}
+
 static int save_result;
 static int delete_result;
 static unsigned int save_calls;
@@ -87,20 +106,24 @@ static const uint8_t *last_write_data_pointer;
 static uint8_t last_write_data[32];
 static uint32_t last_write_length;
 static bool reset_after_online_check;
+static enum usb_dc_status_code reset_after_online_check_status = USB_DC_RESET;
+static enum zmk_usb_conn_state reset_after_online_check_conn_state =
+    ZMK_USB_CONN_POWERED;
 static struct device hid1 = {.name = "HID_1", .ready = true};
 
 #include "../../src/runtime_macro_auth.c"
 #include "../../src/runtime_macro.c"
 #include "../../src/runtime_macro_ascii.c"
+#include "../../src/runtime_macro_dynamic.c"
 #include "../../src/runtime_macro_protocol.c"
 #include "../../src/runtime_macro_usb_hid.c"
 
 void runtime_macro_usb_hid_test_after_online_check(void) {
   if (reset_after_online_check) {
     reset_after_online_check = false;
-    usb_status = USB_DC_RESET;
-    runtime_macro_usb_hid_transport_reset(ZMK_USB_CONN_POWERED,
-                                          USB_DC_RESET);
+    usb_status = reset_after_online_check_status;
+    runtime_macro_usb_hid_transport_reset(
+        reset_after_online_check_conn_state, reset_after_online_check_status);
     usb_status = USB_DC_CONFIGURED;
   }
 }
@@ -219,6 +242,8 @@ static void reset_transport(void) {
   last_write_data_pointer = NULL;
   last_write_length = 0;
   reset_after_online_check = false;
+  reset_after_online_check_status = USB_DC_RESET;
+  reset_after_online_check_conn_state = ZMK_USB_CONN_POWERED;
   memset(last_write_data, 0, sizeof(last_write_data));
   memset(runtime_macro_usb_hid_tx_response, 0,
          sizeof(runtime_macro_usb_hid_tx_response));
@@ -230,6 +255,7 @@ static void reset_transport(void) {
   k_sem_give(&runtime_macro_usb_hid_in_sem);
   runtime_macro_usb_hid_work.submitted = false;
   runtime_macro_usb_hid_dev = NULL;
+  zmk_runtime_macro_dynamic_reset();
   zmk_runtime_macro_protocol_init(&runtime_macro_usb_hid_protocol);
 }
 
@@ -873,6 +899,156 @@ static void test_event_raw_mapping_consistency(void) {
   EXPECT_EQ(101, last_write_data[2]);
 }
 
+static void commit_dynamic_test_text(const char *text) {
+  size_t length = strlen(text);
+  EXPECT_EQ(0, zmk_runtime_macro_dynamic_begin(
+                   length, ZMK_RUNTIME_MACRO_DYNAMIC_DEFAULT_TTL_SECONDS));
+  EXPECT_EQ(0, zmk_runtime_macro_dynamic_append(0U, (const uint8_t *)text,
+                                                 length));
+}
+
+static void expect_dynamic_test_text(const char *text) {
+  size_t length = strlen(text);
+  EXPECT_TRUE(runtime_macro_dynamic_state.committed_valid);
+  EXPECT_EQ(length, runtime_macro_dynamic_state.committed_length);
+  EXPECT_TRUE(memcmp(runtime_macro_dynamic_state.committed, text, length) == 0);
+}
+
+#if CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_USB_DISCONNECT
+static void test_dynamic_disconnect_policy_and_generation_race(void) {
+  struct zmk_usb_conn_state_changed event = {.conn_state = ZMK_USB_CONN_NONE};
+
+  reset_transport();
+  runtime_macro_usb_hid_dev = &hid1;
+  EXPECT_EQ(0, zmk_runtime_macro_slot_set(0, "static", 6));
+  const unsigned int saves_before_lifecycle = save_calls;
+
+  /* Only a stable actual disconnect clears committed dynamic data. */
+  const enum usb_dc_status_code non_disconnect_statuses[] = {
+      USB_DC_UNKNOWN, USB_DC_RESET,       USB_DC_CONFIGURED,
+      USB_DC_SUSPEND, USB_DC_RESUME,      USB_DC_ERROR,
+  };
+  const enum zmk_usb_conn_state non_disconnect_events[] = {
+      ZMK_USB_CONN_NONE, ZMK_USB_CONN_POWERED, ZMK_USB_CONN_HID,
+      ZMK_USB_CONN_HID,  ZMK_USB_CONN_HID,      ZMK_USB_CONN_POWERED,
+  };
+  for (size_t index = 0U;
+       index < sizeof(non_disconnect_statuses) /
+                   sizeof(non_disconnect_statuses[0]);
+       index++) {
+    commit_dynamic_test_text("kept");
+    event.conn_state = non_disconnect_events[index];
+    usb_status = non_disconnect_statuses[index];
+    EXPECT_EQ(0, runtime_macro_usb_hid_conn_state_listener(
+                     (const zmk_event_t *)&event));
+    expect_dynamic_test_text("kept");
+  }
+  EXPECT_EQ(saves_before_lifecycle, save_calls);
+
+  /* A raw DISCONNECTED notification with a stale logical state must not
+   * clear committed data. */
+  commit_dynamic_test_text("stale-powered");
+  event.conn_state = ZMK_USB_CONN_POWERED;
+  usb_status = USB_DC_DISCONNECTED;
+  EXPECT_EQ(0, runtime_macro_usb_hid_conn_state_listener(
+                   (const zmk_event_t *)&event));
+  expect_dynamic_test_text("stale-powered");
+
+  commit_dynamic_test_text("stale-hid");
+  event.conn_state = ZMK_USB_CONN_HID;
+  EXPECT_EQ(0, runtime_macro_usb_hid_conn_state_listener(
+                   (const zmk_event_t *)&event));
+  expect_dynamic_test_text("stale-hid");
+
+  /* The matching raw DISCONNECTED + NONE notification clears committed data.
+   */
+  commit_dynamic_test_text("raw");
+  event.conn_state = ZMK_USB_CONN_NONE;
+  EXPECT_EQ(0, runtime_macro_usb_hid_conn_state_listener(
+                   (const zmk_event_t *)&event));
+  EXPECT_TRUE(!runtime_macro_dynamic_state.committed_valid);
+
+  /* A queued final DATA request racing the disconnect carries the old
+   * generation. The transport reset clears the committed object before the
+   * callback can enqueue that stale request, and the work consumer drops it
+   * after reconnect. */
+  reset_transport();
+  runtime_macro_usb_hid_dev = &hid1;
+  EXPECT_EQ(0, zmk_runtime_macro_slot_set(0, "static", 6));
+  const unsigned int saves_before_disconnect = save_calls;
+  commit_dynamic_test_text("gone");
+
+  uint8_t request[ZMK_RUNTIME_MACRO_PROTOCOL_FRAME_SIZE] = {0};
+  request[0] = ZMK_RUNTIME_MACRO_PROTOCOL_VERSION;
+  request[1] = ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA;
+  request[2] = 121;
+  request[4] = ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT;
+  request[5] = 3;
+  request[8] = 3;
+  request[10] = 'n';
+  request[11] = 'e';
+  request[12] = 'w';
+  struct usb_setup_packet setup = {
+      .bRequest = USB_HID_SET_REPORT,
+      .wValue = 0x0200,
+      .wLength = ZMK_RUNTIME_MACRO_PROTOCOL_FRAME_SIZE,
+  };
+  int32_t len = ZMK_RUNTIME_MACRO_PROTOCOL_FRAME_SIZE;
+  uint8_t *data = request;
+  reset_after_online_check_status = USB_DC_DISCONNECTED;
+  reset_after_online_check_conn_state = ZMK_USB_CONN_NONE;
+  reset_after_online_check = true;
+  usb_status = USB_DC_CONFIGURED;
+  EXPECT_EQ(0, runtime_macro_usb_hid_set_report(&hid1, &setup, &len, &data));
+  EXPECT_TRUE(!runtime_macro_dynamic_state.committed_valid);
+  EXPECT_EQ(1, k_msgq_used(&runtime_macro_usb_hid_msgq));
+  EXPECT_EQ(saves_before_disconnect, save_calls);
+
+  atomic_set(&runtime_macro_usb_hid_online, 1);
+  run_work_once();
+  EXPECT_EQ(0, hid_write_calls);
+  EXPECT_EQ(0, k_msgq_used(&runtime_macro_usb_hid_msgq));
+  EXPECT_EQ(0, save_calls - saves_before_disconnect);
+
+  char static_text[8];
+  size_t static_length = 0U;
+  EXPECT_EQ(0, zmk_runtime_macro_slot_copy(0, static_text, sizeof(static_text),
+                                           &static_length));
+  EXPECT_EQ(6, static_length);
+  EXPECT_TRUE(memcmp(static_text, "static", 6) == 0);
+}
+
+#else
+static void test_dynamic_disconnect_policy_disabled(void) {
+  struct zmk_usb_conn_state_changed event = {
+      .conn_state = ZMK_USB_CONN_NONE,
+  };
+
+  reset_transport();
+  runtime_macro_usb_hid_dev = &hid1;
+  const enum usb_dc_status_code statuses[] = {
+      USB_DC_DISCONNECTED, USB_DC_UNKNOWN, USB_DC_RESET,
+      USB_DC_CONFIGURED,   USB_DC_SUSPEND, USB_DC_RESUME,
+      USB_DC_ERROR,
+  };
+  const enum zmk_usb_conn_state events[] = {
+      ZMK_USB_CONN_NONE, ZMK_USB_CONN_NONE,   ZMK_USB_CONN_POWERED,
+      ZMK_USB_CONN_HID,  ZMK_USB_CONN_HID,    ZMK_USB_CONN_HID,
+      ZMK_USB_CONN_POWERED,
+  };
+
+  for (size_t index = 0U; index < sizeof(statuses) / sizeof(statuses[0]);
+       index++) {
+    commit_dynamic_test_text("kept");
+    event.conn_state = events[index];
+    usb_status = statuses[index];
+    EXPECT_EQ(0, runtime_macro_usb_hid_conn_state_listener(
+                     (const zmk_event_t *)&event));
+    expect_dynamic_test_text("kept");
+  }
+}
+#endif
+
 static void test_init_failures(void) {
   reset_transport();
   bound_device = NULL;
@@ -907,6 +1083,11 @@ int main(void) {
   test_transport_reset_purges_state_and_recovers();
   test_configured_and_disconnect_reclaim_in();
   test_event_raw_mapping_consistency();
+#if CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_USB_DISCONNECT
+  test_dynamic_disconnect_policy_and_generation_race();
+#else
+  test_dynamic_disconnect_policy_disabled();
+#endif
   test_init_failures();
 
   if (failures != 0) {

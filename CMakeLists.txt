@@ -27,6 +27,11 @@ if (CONFIG_ZMK_BEHAVIOR_RUNTIME_MACRO
 
   if (CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC)
     zephyr_library_sources(src/runtime_macro_dynamic.c)
+
+    if (CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_BLE_PROFILE_CHANGE
+        OR CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_ENDPOINT_CHANGE)
+      zephyr_library_sources(src/runtime_macro_dynamic_lifecycle.c)
+    endif()
   endif()
 
   if (CONFIG_ZMK_RUNTIME_MACRO_USB_HID)

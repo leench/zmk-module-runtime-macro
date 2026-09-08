@@ -21,6 +21,10 @@
 #include <zmk/runtime_macro_protocol.h>
 #include <zmk/usb.h>
 
+#if defined(CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC)
+#include "runtime_macro_dynamic_internal.h"
+#endif
+
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #if CONFIG_USB_HID_DEVICE_COUNT < 2
@@ -167,10 +171,29 @@ static void runtime_macro_usb_hid_transport_reset(
       status_stable &&
       runtime_macro_usb_hid_conn_state_for_status(status_after) ==
           event_conn_state;
+#if defined(CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC) && \
+    defined(CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_USB_DISCONNECT) && \
+    CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_USB_DISCONNECT
+  const bool actual_management_usb_disconnect =
+      status_stable && status_after == USB_DC_DISCONNECTED &&
+      event_matches_raw && event_conn_state == ZMK_USB_CONN_NONE;
+#endif
   if (status_stable &&
       runtime_macro_usb_hid_status_reclaims_in(status_after)) {
     runtime_macro_usb_hid_reclaim_in_locked();
   }
+
+#if defined(CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC) && \
+    defined(CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_USB_DISCONNECT) && \
+    CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_USB_DISCONNECT
+  /* Generation increment, protocol discard, and queue purge happen before
+   * this clear while holding the transport mutex. A callback racing the
+   * boundary therefore carries the old generation and cannot commit after a
+   * real disconnect. */
+  if (actual_management_usb_disconnect) {
+    zmk_runtime_macro_dynamic_clear();
+  }
+#endif
 
   /* A stable raw status is not enough to publish HID: an asynchronous event
    * may describe an older status. Require the event/raw mapping to agree and

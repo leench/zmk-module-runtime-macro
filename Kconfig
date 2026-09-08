@@ -78,6 +78,34 @@ config ZMK_RUNTIME_MACRO_DYNAMIC
       not select or enable the USB transport. The dynamic macro source is
       central-side only.
 
+config ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_USB_DISCONNECT
+    bool "Clear dynamic macro on management USB disconnect"
+    default y
+    depends on ZMK_RUNTIME_MACRO_DYNAMIC
+    help
+      Clear committed and staging dynamic macro data when the management USB
+      device reports a stable actual disconnect. USB reset, configuration,
+      suspend, resume, unknown, and error notifications do not clear it.
+
+config ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_BLE_PROFILE_CHANGE
+    bool "Clear dynamic macro on active BLE profile change"
+    default n
+    depends on ZMK_RUNTIME_MACRO_DYNAMIC
+    depends on ZMK_BLE
+    help
+      Clear committed and staging dynamic macro data when ZMK reports an active
+      BLE profile change. This policy is available only when ZMK_BLE is enabled.
+      The default preserves dynamic data for cross-host workflows.
+
+config ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_ENDPOINT_CHANGE
+    bool "Clear dynamic macro on selected endpoint change"
+    default n
+    depends on ZMK_RUNTIME_MACRO_DYNAMIC
+    help
+      Clear committed and staging dynamic macro data when ZMK reports a change
+      to the selected output endpoint. The default preserves dynamic data for
+      cross-host workflows.
+
 config ZMK_BEHAVIOR_RUNTIME_MACRO_DYNAMIC
     bool "Runtime Macro dynamic behavior"
     default y

@@ -10,7 +10,14 @@ build_dir=${TMPDIR:-/tmp}/zmk-runtime-macro-tests
 mkdir -p "$build_dir"
 
 common_cflags="-std=c11 -Wall -Wextra -Werror -pedantic -pthread -I$root_dir/tests/host/stubs -I$root_dir/include"
-test_sources="runtime_macro_slots_test runtime_macro_executor_test runtime_macro_protocol_test runtime_macro_usb_hid_test runtime_macro_auth_test runtime_macro_auth_protocol_test runtime_macro_dynamic_gate_test runtime_macro_dynamic_store_test runtime_macro_dynamic_behavior_test"
+ble_policy_block=$(sed -n '/^config ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_BLE_PROFILE_CHANGE$/,/^config /p' "$root_dir/Kconfig")
+if ! printf '%s\n' "$ble_policy_block" | grep -q 'depends on ZMK_BLE'; then
+    echo "runtime macro BLE lifecycle policy gate: FAIL"
+    exit 1
+fi
+printf '%s\n' "runtime macro BLE lifecycle policy gate: PASS"
+
+test_sources="runtime_macro_slots_test runtime_macro_executor_test runtime_macro_protocol_test runtime_macro_protocol_no_ble_policy_test runtime_macro_usb_hid_test runtime_macro_usb_hid_policy_off_test runtime_macro_auth_test runtime_macro_auth_protocol_test runtime_macro_dynamic_gate_test runtime_macro_dynamic_store_test runtime_macro_dynamic_behavior_test runtime_macro_dynamic_lifecycle_test runtime_macro_dynamic_lifecycle_policy_off_test"
 
 test_suite() {
     compiler=$1
