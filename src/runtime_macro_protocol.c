@@ -312,7 +312,8 @@ runtime_macro_protocol_set_payload_is_valid(const uint8_t *request,
 
 static uint16_t runtime_macro_protocol_dynamic_lifecycle_flags(void) {
   uint16_t flags =
-      ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_FIXED_LIFECYCLE_FLAGS;
+      ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_FIXED_LIFECYCLE_FLAGS |
+      ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_SUPPORTS_KEEP_AFTER_EXECUTE;
 
 #if defined(CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_USB_DISCONNECT) && \
     CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_USB_DISCONNECT
@@ -385,6 +386,7 @@ static int runtime_macro_protocol_process_dynamic_begin(
       request, ZMK_RUNTIME_MACRO_PROTOCOL_TOTAL_LENGTH_OFFSET);
   uint32_t ttl_seconds =
       ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_DEFAULT_TTL_SECONDS;
+  uint8_t begin_flags = 0U;
 
   if (request[ZMK_RUNTIME_MACRO_PROTOCOL_SLOT_OFFSET] !=
       ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT) {
@@ -409,16 +411,31 @@ static int runtime_macro_protocol_process_dynamic_begin(
     return 0;
   }
 
-  if (payload_length != 0U && payload_length != sizeof(uint32_t)) {
+  if (payload_length != 0U && payload_length != 1U &&
+      payload_length != sizeof(uint32_t) &&
+      payload_length != sizeof(uint32_t) + 1U) {
     runtime_macro_protocol_clear_dynamic(protocol);
     runtime_macro_protocol_set_error(
         response, ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_LENGTH);
     return 0;
   }
 
-  if (payload_length == sizeof(uint32_t)) {
+  if (payload_length == sizeof(uint32_t) ||
+      payload_length == sizeof(uint32_t) + 1U) {
     ttl_seconds = runtime_macro_protocol_get_u32(
         request + ZMK_RUNTIME_MACRO_PROTOCOL_PAYLOAD_OFFSET);
+  }
+  if (payload_length == 1U || payload_length == sizeof(uint32_t) + 1U) {
+    begin_flags = request[ZMK_RUNTIME_MACRO_PROTOCOL_PAYLOAD_OFFSET +
+                           (payload_length == 1U ? 0U : sizeof(uint32_t))];
+    if ((begin_flags &
+         (uint8_t)~ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_BEGIN_KNOWN_FLAGS) !=
+        0U) {
+      runtime_macro_protocol_clear_dynamic(protocol);
+      runtime_macro_protocol_set_error(
+          response, ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST);
+      return 0;
+    }
   }
   if (ttl_seconds < ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_MIN_TTL_SECONDS ||
       ttl_seconds > ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_MAX_TTL_SECONDS) {
@@ -430,7 +447,10 @@ static int runtime_macro_protocol_process_dynamic_begin(
 
   (void)k_mutex_lock(&runtime_macro_protocol_dynamic_timeout_mutex,
                      K_FOREVER);
-  int err = zmk_runtime_macro_dynamic_begin(total_length, ttl_seconds);
+  int err = zmk_runtime_macro_dynamic_begin_with_options(
+      total_length, ttl_seconds,
+      (begin_flags & ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_BEGIN_FLAG_KEEP_AFTER_EXECUTE) ==
+          0U);
   if (err == 0) {
     protocol->dynamic_active = true;
     protocol->dynamic_request_id =

@@ -89,8 +89,9 @@ Dynamic object 具有以下语义，UI 必须照此表达：
 - 成功上传后有 TTL，默认 `300 seconds`；
 - 显式 TTL 范围为 `1..86400 seconds`，两端包含；
 - TTL 从最后一个合法 DATA 完成 committed 替换时开始，不从 BEGIN 开始；
-- 物理 `&runtime_macro_dynamic` behavior 被 executor 接受后立即消费；
-- executor 忙或启动失败时不消费，固件返回错误或保留 object；
+- 默认情况下物理 `&runtime_macro_dynamic` behavior 被 executor 接受后立即消费；
+- 上传时可选择 `keep-after-execute`，使成功执行后保留 object；
+- executor 忙或启动失败时无论策略如何都不消费，固件返回错误或保留 object；
 - 没有 GET、LIST 或任何 dynamic readback；
 - 空文本不能上传，清空必须使用 `DYNAMIC_CLEAR`。
 
@@ -205,9 +206,9 @@ response 时立即报告 protocol error，不要把它当作“不支持”或�
 - capability version 不是 `1`；
 - object count 不是 `1`；
 - `max_dynamic_length/default/min/max TTL/transaction timeout` 不是上表固定值；
-- lifecycle reserved bits `6..15` 非零；
+- lifecycle reserved bits `7..15` 非零；
 - 必需 flags `CLEAR_ON_BOOT`、`CLEAR_ON_TTL_EXPIRY`、`CLEAR_ON_EXECUTION_ACCEPT`
-  缺失；
+  缺失；bit 6 `SUPPORTS_KEEP_AFTER_EXECUTE` 用于判断是否可显示保留选项；
 - response metadata、payload length 或 payload tail 不正确。
 
 Lifecycle flags：
@@ -216,11 +217,12 @@ Lifecycle flags：
 | ---: | --- | ---: | --- |
 | `0` | `CLEAR_ON_BOOT` | `1` | 重启后不保留 |
 | `1` | `CLEAR_ON_TTL_EXPIRY` | `1` | TTL 到期后清除 |
-| `2` | `CLEAR_ON_EXECUTION_ACCEPT` | `1` | behavior 被接受后消费 |
+| `2` | `CLEAR_ON_EXECUTION_ACCEPT` | `1` | 默认 behavior 被接受后消费；单次上传可覆盖 |
 | `3` | `CLEAR_ON_USB_DISCONNECT` | `1` | 实际 management USB disconnect 清除 |
 | `4` | `CLEAR_ON_BLE_PROFILE_CHANGE` | `0` | 默认切换 BLE profile 保留 |
 | `5` | `CLEAR_ON_SELECTED_ENDPOINT_CHANGE` | `0` | 默认切换 selected endpoint 保留 |
-| `6..15` | reserved | `0` | 非零视为 malformed |
+| `6` | `SUPPORTS_KEEP_AFTER_EXECUTE` | `1` | 支持上传后保留选项 |
+| `7..15` | reserved | `0` | 非零视为 malformed |
 
 应用应在 capability 页面显示 flags，而不是把默认值硬编码为唯一行为。例如用户可以
 看到“USB disconnect：clear”“BLE profile：preserve”“selected endpoint：preserve”。
@@ -246,7 +248,8 @@ Lifecycle flags：
 3. 每个 byte 必须属于：`0x20..0x7e`、LF `0x0a`、Tab `0x09`、Backspace `0x08`；
 4. 拒绝 NUL、DEL、UTF-8 多字节字符、中文、Emoji 和其他 Unicode；
 5. TTL 缺省表示 `300 seconds`；显式 TTL 必须为整数 `1..86400`；
-6. 空文本不能转换为 clear，必须由用户明确点击 clear。
+6. 默认执行后消费；只有 capability bit 6 为 `1` 时才允许选择 `keep-after-execute`；
+7. 空文本不能转换为 clear，必须由用户明确点击 clear。
 
 应用应在本地校验失败时不打开或不写入 HID，并给出字段级错误。不要先发送
 `CAPABILITIES` 再发现文本非法。
@@ -259,8 +262,9 @@ Lifecycle flags：
 - slot `0xff`；
 - offset `0`；
 - total length 为文本 byte length，范围 `1..256`；
-- payload length 为 `0`（使用 300 秒默认 TTL）或 `4`（显式 TTL）；
-- 显式 TTL 为 uint32 little-endian seconds；
+- payload length 为 `0/4`（默认/显式 TTL，执行后消费），或 `1/5`（默认/显式
+  TTL 加一个 flags byte）；
+- 显式 TTL 为 uint32 little-endian seconds；flags bit 0 为 `KEEP_AFTER_EXECUTE`；
 - payload tail 全零。
 
 BEGIN response 必须是 empty-success response，且 `offset=0`、`total_length=请求的文本
@@ -414,13 +418,13 @@ configured 和 host OS shutdown 不能被应用当作可靠的 disconnect clear 
 
 桌面应用测试至少覆盖：
 
-1. 合法 capability response（flags `0x000f` 和可选 bit 4/5）；
+1. 合法 capability response（flags `0x004f` 和可选 bit 4/5）；
 2. `BAD_OPCODE`、`BAD_VERSION`、malformed capability、reserved flags；
 3. 输入 1、22、23、256 bytes；
 4. LF、Tab、Backspace、可打印 ASCII；
 5. NUL、DEL、中文、Emoji、UTF-8 多字节、空文本、257 bytes；
 6. invalid input 在任何 HID write 前失败；
-7. 默认 TTL 和显式 TTL 的 little-endian BEGIN payload；
+7. 默认/显式 TTL、keep-after-execute flags 的 BEGIN payload（0/1/4/5 bytes）；
 8. BEGIN/DATA 使用同一 request ID；
 9. DATA timeout、BEGIN timeout、final ACK 丢失后用新 ID 从 BEGIN 重启；
 10. DATA `BAD_REQUEST`/`BAD_OFFSET` 后从 BEGIN 重启；
@@ -441,8 +445,9 @@ configured 和 host OS shutdown 不能被应用当作可靠的 disconnect clear 
 1. 枚举 management HID；
 2. 上传包含字母、数字、标点、LF、Tab、Backspace 的固定文本；
 3. 按一次 `&runtime_macro_dynamic`，核对普通键盘输出；
-4. 再按一次，确认已消费且无输出；
-5. 上传后在 TTL 到期前执行成功，过期后无输出。
+4. 再按一次，确认默认策略已消费且无输出；
+5. 使用 keep-after-execute 上传，再按两次，确认两次均输出；
+6. 上传后在 TTL 到期前执行成功，过期后无输出。
 
 #### B. Busy 与 retry
 

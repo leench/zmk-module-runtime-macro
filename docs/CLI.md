@@ -22,7 +22,8 @@
 - 认证不加密 USB 流量；密码配置保护管理操作，不保护按键触发时的键盘输出。
 - dynamic macro 的 `CAPABILITIES`、`DYNAMIC_BEGIN`、`DYNAMIC_DATA`、`DYNAMIC_CLEAR`
   不经过 static slot 的 password gate；这些操作不会自动登录，也不会刷新已有认证窗口。dynamic
-  object 只在 RAM 中存在、没有 readback，成功执行一次后消费，并受 TTL 约束。
+  object 只在 RAM 中存在、没有 readback，默认成功执行一次后消费；使用 keep-after-execute
+  选项时可在 TTL 内重复执行，并受 lifecycle clear 约束。
 - dynamic channel 只应由客户端用于非-secret 文本。这是产品和客户端使用约束，不是固件能够验证的
   语义安全保证；不要上传密码、OTP、token、密钥或其他秘密。
 
@@ -122,8 +123,9 @@ python3 tools/runtime_macro_cli.py lock
 python3 tools/runtime_macro_cli.py capabilities
 ```
 
-客户端会严格校验 capability version、对象数量、最大长度、TTL 边界、transaction timeout 和保留
-flags。固件返回 `BAD_OPCODE` 时会明确报告不支持 dynamic macro；不会降级为 static `set`。
+客户端会严格校验 capability version、对象数量、最大长度、TTL 边界、transaction timeout、保留
+flags 和 `SUPPORTS_KEEP_AFTER_EXECUTE`。固件返回 `BAD_OPCODE` 时会明确报告不支持 dynamic
+macro；不会降级为 static `set`。
 
 ### `dynamic-set`
 
@@ -133,9 +135,14 @@ flags。固件返回 `BAD_OPCODE` 时会明确报告不支持 dynamic macro；�
 python3 tools/runtime_macro_cli.py dynamic-set --text 'Hello'
 printf 'A\tB\n' | python3 tools/runtime_macro_cli.py dynamic-set --stdin
 python3 tools/runtime_macro_cli.py dynamic-set --file dynamic.txt --ttl 600
+python3 tools/runtime_macro_cli.py dynamic-set --text 'Repeatable' --keep-after-execute
 ```
 
-客户端在任何 HID write 前检查 1..256 bytes、允许的 ASCII/control bytes 和 TTL `1..86400`。
+默认情况下，dynamic macro 被 executor 接受后消费，按第二次不会再输出。使用
+`--keep-after-execute` 可在执行后保留 committed text；该选项要求 capabilities 的
+`SUPPORTS_KEEP_AFTER_EXECUTE` bit，仍受 TTL、`dynamic-clear`、USB disconnect、可选 lifecycle
+clear 和新的上传影响。客户端在任何 HID write 前检查 1..256 bytes、允许的 ASCII/control bytes
+和 TTL `1..86400`。
 未指定 `--ttl` 时使用固件默认值 300 秒。客户端先读取 capabilities，再以 22-byte payload 分块发送
 `DYNAMIC_BEGIN`/`DYNAMIC_DATA`；BEGIN 和全部 DATA 使用同一 request ID。传输超时、`BAD_REQUEST` 或
 `BAD_OFFSET` 会用新的 request ID 从 BEGIN 重启整个上传；不会自动登录，也不会退回 static `set`。
@@ -204,8 +211,9 @@ python3 tools/runtime_macro_cli.py set 2 --file slot-2.txt
 `set` 会先在客户端校验输入，再按协议的 22-byte payload 分块发送。传输超时或事务状态错误
 会以新的 request ID 从 offset `0` 重新开始；设备不会在完整 SET 事务完成前改变 slot。
 
-`dynamic-set` 使用相同的 22-byte 分块大小，但上限固定为 256 bytes，并且 dynamic BEGIN 的 TTL
-payload 是可选的 4-byte little-endian seconds；它与 static `set` 完全不是同一个 slot 或持久化路径。
+`dynamic-set` 使用相同的 22-byte 分块大小，但上限固定为 256 bytes。dynamic BEGIN payload
+可以是 `0`、`1`、`4` 或 `5` bytes：`1/5` 的最后一个 flags byte 中 bit 0 为
+`KEEP_AFTER_EXECUTE`；它与 static `set` 完全不是同一个 slot 或持久化路径。
 
 ### `clear SLOT`
 

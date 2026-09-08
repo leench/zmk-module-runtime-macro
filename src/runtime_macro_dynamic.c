@@ -72,6 +72,7 @@ static void runtime_macro_dynamic_cancel_staging_locked(void) {
     runtime_macro_dynamic_state.staging_received = 0U;
     runtime_macro_dynamic_state.staging_active = false;
     runtime_macro_dynamic_state.staging_ttl_seconds = 0U;
+    runtime_macro_dynamic_state.staging_consume_on_accept = true;
 }
 
 static void runtime_macro_dynamic_clear_committed_locked(void) {
@@ -79,6 +80,7 @@ static void runtime_macro_dynamic_clear_committed_locked(void) {
                                   sizeof(runtime_macro_dynamic_state.committed));
     runtime_macro_dynamic_state.committed_length = 0U;
     runtime_macro_dynamic_state.committed_valid = false;
+    runtime_macro_dynamic_state.committed_consume_on_accept = true;
 }
 
 static void runtime_macro_dynamic_expire_locked(int64_t now_ms) {
@@ -137,10 +139,12 @@ void zmk_runtime_macro_dynamic_reset(void) {
                                   sizeof(runtime_macro_dynamic_state.staging));
     runtime_macro_dynamic_state.committed_length = 0U;
     runtime_macro_dynamic_state.committed_valid = false;
+    runtime_macro_dynamic_state.committed_consume_on_accept = true;
     runtime_macro_dynamic_state.staging_expected_length = 0U;
     runtime_macro_dynamic_state.staging_received = 0U;
     runtime_macro_dynamic_state.staging_active = false;
     runtime_macro_dynamic_state.staging_ttl_seconds = 0U;
+    runtime_macro_dynamic_state.staging_consume_on_accept = true;
     runtime_macro_dynamic_state.ttl_deadline_ms = 0;
     runtime_macro_dynamic_state.ttl_generation = 0U;
     runtime_macro_dynamic_state.ttl_work_generation = 0U;
@@ -148,7 +152,9 @@ void zmk_runtime_macro_dynamic_reset(void) {
     (void)k_mutex_unlock(&runtime_macro_dynamic_mutex);
 }
 
-int zmk_runtime_macro_dynamic_begin(size_t total_length, uint32_t ttl_seconds) {
+int zmk_runtime_macro_dynamic_begin_with_options(size_t total_length,
+                                                 uint32_t ttl_seconds,
+                                                 bool consume_on_accept) {
     int err = 0;
 
     (void)k_mutex_lock(&runtime_macro_dynamic_mutex, K_FOREVER);
@@ -166,11 +172,17 @@ int zmk_runtime_macro_dynamic_begin(size_t total_length, uint32_t ttl_seconds) {
     runtime_macro_dynamic_cancel_staging_locked();
     runtime_macro_dynamic_state.staging_expected_length = total_length;
     runtime_macro_dynamic_state.staging_ttl_seconds = ttl_seconds;
+    runtime_macro_dynamic_state.staging_consume_on_accept = consume_on_accept;
     runtime_macro_dynamic_state.staging_active = true;
 
 out:
     (void)k_mutex_unlock(&runtime_macro_dynamic_mutex);
     return err;
+}
+
+int zmk_runtime_macro_dynamic_begin(size_t total_length, uint32_t ttl_seconds) {
+    return zmk_runtime_macro_dynamic_begin_with_options(total_length, ttl_seconds,
+                                                        true);
 }
 
 int zmk_runtime_macro_dynamic_append(size_t offset, const uint8_t *data,
@@ -218,6 +230,8 @@ int zmk_runtime_macro_dynamic_append(size_t offset, const uint8_t *data,
             sizeof(runtime_macro_dynamic_state.committed) - committed_length);
         runtime_macro_dynamic_state.committed_length = committed_length;
         runtime_macro_dynamic_state.committed_valid = true;
+        runtime_macro_dynamic_state.committed_consume_on_accept =
+            runtime_macro_dynamic_state.staging_consume_on_accept;
         runtime_macro_dynamic_schedule_ttl_locked(
             runtime_macro_dynamic_state.staging_ttl_seconds);
         runtime_macro_dynamic_cancel_staging_locked();
@@ -263,7 +277,7 @@ int zmk_runtime_macro_dynamic_execute(void) {
     err = zmk_runtime_macro_executor_start(
         runtime_macro_dynamic_state.committed,
         runtime_macro_dynamic_state.committed_length);
-    if (err == 0) {
+    if (err == 0 && runtime_macro_dynamic_state.committed_consume_on_accept) {
         /* The executor now owns an independent snapshot. */
         runtime_macro_dynamic_clear_committed_locked();
         runtime_macro_dynamic_cancel_ttl_locked();

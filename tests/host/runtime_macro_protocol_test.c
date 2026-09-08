@@ -961,31 +961,47 @@ static void expect_dynamic_empty(void) {
   }
 }
 
-static void dynamic_begin(struct zmk_runtime_macro_protocol *protocol,
-                          uint8_t request_id, uint16_t total_length,
-                          uint32_t ttl_seconds, uint8_t *request,
-                          uint8_t *response) {
-  uint8_t ttl[4];
+static void dynamic_begin_with_flags(
+    struct zmk_runtime_macro_protocol *protocol, uint8_t request_id,
+    uint16_t total_length, uint32_t ttl_seconds, uint8_t begin_flags,
+    uint8_t *request, uint8_t *response) {
+  uint8_t payload[5];
   uint8_t payload_length = 0U;
-  const void *payload = NULL;
+  const void *payload_ptr = NULL;
 
   if (ttl_seconds != 0U) {
-    ttl[0] = (uint8_t)ttl_seconds;
-    ttl[1] = (uint8_t)(ttl_seconds >> 8);
-    ttl[2] = (uint8_t)(ttl_seconds >> 16);
-    ttl[3] = (uint8_t)(ttl_seconds >> 24);
-    payload_length = sizeof(ttl);
-    payload = ttl;
+    payload[0] = (uint8_t)ttl_seconds;
+    payload[1] = (uint8_t)(ttl_seconds >> 8);
+    payload[2] = (uint8_t)(ttl_seconds >> 16);
+    payload[3] = (uint8_t)(ttl_seconds >> 24);
+    payload_length = sizeof(uint32_t);
+    if (begin_flags != 0U) {
+      payload[4] = begin_flags;
+      payload_length++;
+    }
+    payload_ptr = payload;
+  } else if (begin_flags != 0U) {
+    payload[0] = begin_flags;
+    payload_length = 1U;
+    payload_ptr = payload;
   }
 
   make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION,
                ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_BEGIN, request_id, 0,
                ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 0, total_length,
-               payload_length, payload);
+               payload_length, payload_ptr);
   process_request(protocol, request, response);
   expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_BEGIN,
                  request_id, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 0,
                  total_length, NULL, 0);
+}
+
+static void dynamic_begin(struct zmk_runtime_macro_protocol *protocol,
+                          uint8_t request_id, uint16_t total_length,
+                          uint32_t ttl_seconds, uint8_t *request,
+                          uint8_t *response) {
+  dynamic_begin_with_flags(protocol, request_id, total_length, ttl_seconds, 0U,
+                           request, response);
 }
 
 static void dynamic_data(struct zmk_runtime_macro_protocol *protocol,
@@ -1031,17 +1047,18 @@ static void test_dynamic_wire_constants_and_capabilities(void) {
   EXPECT_EQ(0x23, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CAPABILITIES);
   EXPECT_EQ(0xff, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT);
   EXPECT_EQ(22, ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_PAYLOAD_LENGTH);
-  EXPECT_EQ(0x003f,
+  EXPECT_EQ(0x007f,
             ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_FIXED_LIFECYCLE_FLAGS |
                 ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_CLEAR_ON_USB_DISCONNECT |
                 ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_CLEAR_ON_BLE_PROFILE_CHANGE |
-                ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_CLEAR_ON_ENDPOINT_CHANGE);
+                ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_CLEAR_ON_ENDPOINT_CHANGE |
+                ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_SUPPORTS_KEEP_AFTER_EXECUTE);
 
   make_request(request, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CAPABILITIES, 1,
                0, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 0, 0, 0, NULL);
   process_request(&protocol, request, response);
   uint8_t expected[22] = {
-      1, 1, 0x3f, 0x00, 0x00, 0x01, 0x2c, 0x01, 0x00, 0x00,
+      1, 1, 0x7f, 0x00, 0x00, 0x01, 0x2c, 0x01, 0x00, 0x00,
       0x01, 0x00, 0x00, 0x00, 0x80, 0x51, 0x01, 0x00, 0x1e, 0x00,
       0x00, 0x00,
   };
@@ -1111,6 +1128,36 @@ static void test_dynamic_upload_sizes_ttl_and_no_readback(void) {
                    ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 0, 0, NULL, 0);
     expect_dynamic_empty();
   }
+}
+
+static void test_dynamic_keep_after_execute(void) {
+  struct zmk_runtime_macro_protocol protocol;
+  uint8_t request[32];
+  uint8_t response[32];
+
+  reset_slots();
+  zmk_runtime_macro_protocol_init(&protocol);
+  dynamic_begin_with_flags(
+      &protocol, 60, 1, 0,
+      ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_BEGIN_FLAG_KEEP_AFTER_EXECUTE,
+      request, response);
+  dynamic_data(&protocol, 60, 0, 1, "k", 1, request, response);
+  expect_dynamic_text((const uint8_t *)"k", 1);
+  EXPECT_TRUE(!runtime_macro_dynamic_state.committed_consume_on_accept);
+  EXPECT_EQ(0, zmk_runtime_macro_dynamic_execute());
+  expect_dynamic_text((const uint8_t *)"k", 1);
+
+  const uint8_t invalid_flags[] = {0x80U};
+  make_request(request, 2,
+               ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_BEGIN, 61, 0,
+               ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 0, 1,
+               sizeof(invalid_flags), invalid_flags);
+  process_request(&protocol, request, response);
+  expect_error(response, 2,
+               ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_BEGIN, 61,
+               ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST);
+  expect_dynamic_text((const uint8_t *)"k", 1);
 }
 
 static void test_dynamic_validation_and_restart(void) {
@@ -1221,7 +1268,7 @@ static void test_dynamic_validation_and_restart(void) {
   process_request(&protocol, request, response);
   expect_error(response, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_BEGIN,
                17, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT,
-               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_LENGTH);
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_REQUEST);
 
   dynamic_begin(&protocol, 18, 2, 0, request, response);
   dynamic_data(&protocol, 18, 0, 2, "a", 1, request, response);
@@ -1504,6 +1551,7 @@ int main(void) {
   test_storage_errors_and_clear();
   test_dynamic_wire_constants_and_capabilities();
   test_dynamic_upload_sizes_ttl_and_no_readback();
+  test_dynamic_keep_after_execute();
   test_dynamic_validation_and_restart();
   test_dynamic_clear_and_static_staging_isolation();
   test_dynamic_transaction_timeout_and_discard();

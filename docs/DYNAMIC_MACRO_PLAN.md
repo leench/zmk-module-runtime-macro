@@ -1066,7 +1066,7 @@ Phase 7 交接产物输出；Phase 8 继续负责桌面应用跨组件集成、�
 
 文档必须明确：
 
-- RAM-only、单次消费、TTL、无 readback；
+- RAM-only、默认单次消费（可选执行后保留）、TTL、无 readback；
 - 动态通道第一版不受 static password gate 保护；
 - USB 流量不加密；
 - 不能可靠识别 host OS shutdown；
@@ -1095,7 +1095,7 @@ Phase 7 交接产物输出；Phase 8 继续负责桌面应用跨组件集成、�
 | 无 GET/LIST/readback | 0、5、7 | 5、7、8 |
 | 物理 behavior 执行 | 3–4 | 4、8 |
 | 共用单执行器 | 3 | 3、8 |
-| accepted 后消费 | 2–4 | 3、4、8 |
+| accepted 后默认消费/可选保留 | 2–4、增量 | 3、4、8、增量测试 |
 | busy/start error 保留 | 3–4 | 3、4、8 |
 | actual USB disconnect clear | 6 | 6、8 |
 | output/profile 默认保留 | 6 | 6、8 |
@@ -1140,3 +1140,30 @@ Phase 7 交接产物输出；Phase 8 继续负责桌面应用跨组件集成、�
 - [ ] RAM/Flash 最终数据已记录
 - [ ] 用户文档与安全边界已更新
 - [ ] 每个阶段均已独立 commit、push 并获得进入下一阶段的确认
+
+## 17. 执行后保留选项增量（实现记录）
+
+在保持默认行为不变的前提下，dynamic upload 增加可选的执行后策略：
+
+- 默认 `DYNAMIC_BEGIN` 不带 flags，executor 接受后消费 committed text；
+- `DYNAMIC_BEGIN` payload length `1` 或 `5` 时，flags bit 0
+  `KEEP_AFTER_EXECUTE=1` 表示执行成功后保留 committed text；
+- payload length `0/4` 仍分别表示默认/显式 TTL 的旧编码，保证默认 client
+  与旧调用方式兼容；
+- `CAPABILITIES.lifecycle_flags` bit 6
+  `SUPPORTS_KEEP_AFTER_EXECUTE` 表示固件支持该可选参数；
+- 保留策略不改变 TTL、`DYNAMIC_CLEAR`、USB disconnect、可选 lifecycle clear
+  或重新上传的清除语义；executor busy/start failure 仍保留 committed text；
+- Python API 增加 `keep_after_execute=False`，CLI 增加
+  `--keep-after-execute`；桌面应用规范同步更新；
+- 仍不提供 dynamic readback，也不改变默认的 RAM-only、非 secret 产品约束。
+
+### 17.1 验证记录
+
+- Host C suite（`CLANG=gcc ./tests/host/run.sh`）：全部通过，覆盖默认消费、保留
+  策略、未知 flags、TTL、busy/start failure 和 capability bit 6；
+- Python client/CLI：62 tests、`py_compile` 和 Ruff 全部通过；
+- Totem 正式 `just totem-dongle`：FLASH `432196 / 811008 B`，RAM
+  `194190 / 262144 B`，`zmk.uf2` 成功生成；
+- 默认行为保持消费；`--keep-after-execute` 发送 BEGIN flags bit 0，实物验证待
+  新固件刷入后进行。

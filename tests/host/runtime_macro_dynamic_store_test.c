@@ -20,11 +20,14 @@
 #include "../../src/runtime_macro_ascii.c"
 #include "../../src/runtime_macro_dynamic.c"
 
-/* Phase-2 store tests do not exercise executor handoff. */
+static int executor_start_result;
+static unsigned int executor_start_calls;
+
 int zmk_runtime_macro_executor_start(const uint8_t *text, size_t length) {
     (void)text;
     (void)length;
-    return -ENOSYS;
+    executor_start_calls++;
+    return executor_start_result;
 }
 
 int64_t host_uptime;
@@ -74,15 +77,23 @@ static void assert_staging_empty(void) {
     assert(runtime_macro_dynamic_state.staging_expected_length == 0U);
     assert(runtime_macro_dynamic_state.staging_received == 0U);
     assert(runtime_macro_dynamic_state.staging_ttl_seconds == 0U);
+    assert(runtime_macro_dynamic_state.staging_consume_on_accept);
     assert(all_zero(runtime_macro_dynamic_state.staging,
                     sizeof(runtime_macro_dynamic_state.staging)));
 }
 
-static void commit_text(const uint8_t *text, size_t length,
-                        uint32_t ttl_seconds) {
-    assert(zmk_runtime_macro_dynamic_begin(length, ttl_seconds) == 0);
+static void commit_text_with_policy(const uint8_t *text, size_t length,
+                                    uint32_t ttl_seconds,
+                                    bool consume_on_accept) {
+    assert(zmk_runtime_macro_dynamic_begin_with_options(
+               length, ttl_seconds, consume_on_accept) == 0);
     assert(zmk_runtime_macro_dynamic_append(0U, text, length) == 0);
     assert_committed(text, length);
+}
+
+static void commit_text(const uint8_t *text, size_t length,
+                        uint32_t ttl_seconds) {
+    commit_text_with_policy(text, length, ttl_seconds, true);
 }
 
 static void test_reset_and_lengths(void) {
@@ -208,6 +219,33 @@ static void test_staging_and_atomic_commit(void) {
     assert(zmk_runtime_macro_dynamic_append(0U, NULL, 1U) == -EINVAL);
     assert_committed((const uint8_t *)"CD", 2U);
     assert_staging_empty();
+}
+
+static void test_execution_consumption_policy(void) {
+    const uint8_t text[] = "repeatable";
+
+    zmk_runtime_macro_dynamic_reset();
+    executor_start_result = 0;
+    executor_start_calls = 0U;
+    commit_text(text, sizeof(text) - 1U,
+                ZMK_RUNTIME_MACRO_DYNAMIC_DEFAULT_TTL_SECONDS);
+    assert(runtime_macro_dynamic_state.committed_consume_on_accept);
+    assert(zmk_runtime_macro_dynamic_execute() == 0);
+    assert(executor_start_calls == 1U);
+    assert_committed_empty();
+
+    zmk_runtime_macro_dynamic_reset();
+    commit_text_with_policy(text, sizeof(text) - 1U,
+                            ZMK_RUNTIME_MACRO_DYNAMIC_DEFAULT_TTL_SECONDS,
+                            false);
+    assert(!runtime_macro_dynamic_state.committed_consume_on_accept);
+    assert(zmk_runtime_macro_dynamic_execute() == 0);
+    assert(executor_start_calls == 2U);
+    assert_committed(text, sizeof(text) - 1U);
+
+    executor_start_result = -EBUSY;
+    assert(zmk_runtime_macro_dynamic_execute() == -EBUSY);
+    assert_committed(text, sizeof(text) - 1U);
 }
 
 static void test_ttl_and_generation(void) {
@@ -346,6 +384,7 @@ int main(void) {
     test_reset_and_lengths();
     test_allowed_and_rejected_bytes();
     test_staging_and_atomic_commit();
+    test_execution_consumption_policy();
     test_ttl_and_generation();
     test_clear_and_zeroize();
     test_clear_vs_final_append();

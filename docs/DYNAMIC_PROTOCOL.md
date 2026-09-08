@@ -3,7 +3,7 @@
 本文是 RAM-only dynamic macro 的最终 wire contract。它只定义已有
 Runtime Macro v2 32-byte management frame 上的 capability、上传和 clear；不改变
 静态 `LIST`/`GET`/`SET`/`CLEAR`、`AUTH_*`、`PASSWORD_SET` 或 `LOCK` 的语义。
-动态宏尚未由本文实现；实现、Python client 和测试必须逐字节遵循本文。
+固件、Python client 和桌面应用必须逐字节遵循本文。
 
 文中的 **MUST**/“必须”是互操作要求。所有整数均为 unsigned little-endian。
 动态协议没有动态文本 readback，也没有 protocol execute。
@@ -22,13 +22,15 @@ Runtime Macro v2 32-byte management frame 上的 capability、上传和 clear；
 | 默认 TTL | `300` seconds（5 分钟） |
 | 显式 TTL | `1..86400` seconds，包含两端 |
 | staging inactivity timeout | `30` seconds |
+| 执行后策略 | 默认接受后消费；可选上传后保留 |
 | TTL 起点 | 最后一个合法 `DYNAMIC_DATA` 完成 committed 替换之后 |
 | 执行入口 | 只能是物理 `&runtime_macro_dynamic` behavior |
 | 动态命令认证 | 不经过静态管理 authorization gate；这是第一版明确的安全边界 |
 
 完整上传才替换 committed text。`BEGIN`、不完整上传、超时、非法 chunk、
-重复/乱序 chunk 和失败上传都不得破坏旧 committed text。成功执行被 executor
-接受时才消费 committed text；executor 忙或启动失败时必须保留它。
+重复/乱序 chunk 和失败上传都不得破坏旧 committed text。默认情况下成功执行被
+executor 接受时消费 committed text；上传可选择执行后保留。executor 忙或启动
+失败时无论策略如何都必须保留它。
 
 ## 2. Opcode、frame 和兼容性
 
@@ -169,16 +171,18 @@ opcode handling 的副作用。
 | ---: | --- | --- |
 | `0` | `CLEAR_ON_BOOT` | `1`；RAM 初始化清除 |
 | `1` | `CLEAR_ON_TTL_EXPIRY` | `1`；TTL 到期清除 |
-| `2` | `CLEAR_ON_EXECUTION_ACCEPT` | `1`；物理 behavior 被 executor 接受时消费 |
+| `2` | `CLEAR_ON_EXECUTION_ACCEPT` | `1`；默认 behavior 被 executor 接受时消费；单次上传可覆盖为保留 |
 | `3` | `CLEAR_ON_USB_DISCONNECT` | `1`，实际管理 USB disconnect 默认清除 |
 | `4` | `CLEAR_ON_BLE_PROFILE_CHANGE` | `0`；默认保留，可配置为 `1` |
 | `5` | `CLEAR_ON_SELECTED_ENDPOINT_CHANGE` | `0`；默认保留，可配置为 `1` |
-| `6..15` | 保留 | 必须为 `0` |
+| `6` | `SUPPORTS_KEEP_AFTER_EXECUTE` | `1`；支持 BEGIN 的保留选项 |
+| `7..15` | 保留 | 必须为 `0` |
 
 响应中的所有字段和 reserved bits 必须符合上述值；client 遇到未知
 `capability_version`、错误 `dynamic_object_count`、非零 reserved bits 或
-超出约定范围的数值，必须报告 malformed capability，不得发送动态写入。
-capability response 的 payload 不是动态文本。
+超出约定范围的数值，必须报告 malformed capability，不得发送动态写入。只有
+`SUPPORTS_KEEP_AFTER_EXECUTE` 为 `1` 时，client 才可以发送保留选项；不支持时
+普通默认消费上传仍可用。capability response 的 payload 不是动态文本。
 
 ## 4. Dynamic state、TTL 和执行边界
 
@@ -186,10 +190,10 @@ capability response 的 payload 不是动态文本。
 
 实现维护一个动态对象的两个 bounded buffer：
 
-1. `committed`：当前可由 `&runtime_macro_dynamic` 消费的文本，长度 `1..256`
-   或 empty；
+1. `committed`：当前可由 `&runtime_macro_dynamic` 执行的文本，长度 `1..256`
+   或 empty，并带有执行后消费/保留策略；
 2. `staging`：当前一次上传的临时文本，长度由 `total_length` 声明，最多
-   `256`。
+   `256`，并带有待提交的执行策略。
 
 另外保存 `committed_length`、`staging_received`、TTL deadline、transaction
 request ID、transaction total 和 staging deadline。staging 与 committed 必须
@@ -227,8 +231,8 @@ transaction 是两套相互隔离的状态，即使实现把它们放在同一�
 - 最终 DATA 使 `staging_received == total_length` 时，在一个不可观察到半成品
   的临界区中把完整 staging 原子替换为 committed，启动新的 TTL，并清空 staging
   transaction。旧 committed 只在新值完整复制后才 zeroize。
-- 新 commit 使用 BEGIN 中的 TTL；TTL deadline 从 commit 完成时刻开始，不从
-  BEGIN 或第一 chunk 开始。
+- 新 commit 使用 BEGIN 中的 TTL 和执行后策略；TTL deadline 从 commit 完成时刻
+  开始，不从 BEGIN 或第一 chunk 开始。
 - TTL 到期是一次动态状态清除：zeroize committed、staging，取消 transaction
   和 TTL。它不发送 response；下一个 behavior press 不产生输出。
 - staging inactivity timeout 只清除 staging transaction，保留旧 committed
@@ -237,8 +241,8 @@ transaction 是两套相互隔离的状态，即使实现把它们放在同一�
   重复执行仍返回 `OK`；它不清除 static `SET/PASSWORD_SET` staging，也不得调用
   完整的 protocol discard。
 - reboot/reset 的 volatile initialization 使 committed、staging 和 TTL 全部为空。
-- clear、替换、到期和 executor snapshot 完成/失败/取消后都必须 zeroize 相应
-  RAM；日志不得包含动态文本或 chunk。
+- clear、替换和到期必须 zeroize store 中相应 RAM；executor snapshot 无论动态
+  策略如何都必须在完成/失败/取消后 zeroize。日志不得包含动态文本或 chunk。
 
 ### 4.3 Physical behavior
 
@@ -248,10 +252,11 @@ macro 相同的单一 executor：
 - empty 或已到期：无输出并保持 harmless；
 - executor 忙：返回 `-EBUSY`，不消费 committed；
 - executor 无法 schedule/start：返回错误，不消费 committed；
-- executor 接受 snapshot：立即从 dynamic store 消费并清除 committed/TTL，之后
-  executor 用独立 snapshot 继续完成 keycode 事件；后续 `DYNAMIC_CLEAR` 或 lifecycle
-  clear 不会中断或回读这个 executor-owned snapshot，snapshot 仍在 executor 完成、
-  失败或取消时 zeroize；
+- executor 接受 snapshot：默认立即从 dynamic store 消费并清除 committed/TTL；若
+  本次上传选择保留，则 committed 和 TTL 继续存在。无论哪种策略，executor 都用
+  独立 snapshot 继续完成 keycode 事件；后续 `DYNAMIC_CLEAR` 或 lifecycle clear
+  不会中断或回读这个 executor-owned snapshot，snapshot 仍在 executor 完成、失败
+  或取消时 zeroize；
 - static 和 dynamic 不排队、不并发，不能创建第二个 worker；
 - executor 结束、event failure 或取消后 zeroize snapshot。
 
@@ -269,19 +274,24 @@ Request 固定字段：
 | `slot` | `0xff` |
 | `offset` | `0` |
 | `total_length` | `1..256`；只表示文本长度，不包含 TTL |
-| `payload_length` | 只能是 `0` 或 `4` |
-| payload 长度 `0` | 使用默认 TTL `300` |
+| `payload_length` | 只能是 `0`、`1`、`4` 或 `5` |
+| payload 长度 `0` | 使用默认 TTL `300`，执行后消费 |
+| payload 长度 `1` | `payload[0]` 是 BEGIN flags；使用默认 TTL |
 | payload 长度 `4` | `payload[0..3]` 是 TTL seconds 的 uint32 LE，范围 `1..86400` |
+| payload 长度 `5` | `payload[0..3]` 是 TTL；`payload[4]` 是 BEGIN flags |
 | payload 尾部 | payload 长度之后必须全零 |
 
-显式 TTL `0`、大于 `86400` 或 payload 长度不是 `0/4` 返回 `BAD_LENGTH`。
-`offset` 非零返回 `BAD_OFFSET`。slot 错误返回 `BAD_SLOT`。这些 BEGIN
-semantic errors 都 zeroize/cancel 当前 staging，但保留旧 committed text。
+BEGIN flags 当前只有 bit `0`：`KEEP_AFTER_EXECUTE`。bit `0=0` 表示执行
+被 executor 接受后消费；bit `0=1` 表示执行后保留。其他 flags bit 返回
+`BAD_REQUEST`。显式 TTL `0`、大于 `86400` 或 payload 长度不是 `0/1/4/5`
+返回 `BAD_LENGTH`。`offset` 非零返回 `BAD_OFFSET`。slot 错误返回 `BAD_SLOT`。
+这些 BEGIN semantic errors 都 zeroize/cancel 当前 staging，但保留旧 committed
+text。
 
 合法 BEGIN 的处理是无条件开始一个新 transaction，即使已有 staging，也即使
 request ID 与旧 transaction 相同；它不会清 committed。服务器记录
-`request_id`、`total_length`、TTL 和 `received=0`，并启动/重置 30-second
-inactivity timeout。
+`request_id`、`total_length`、TTL、执行后策略和 `received=0`，并启动/重置
+30-second inactivity timeout。
 
 成功 response：
 
@@ -684,7 +694,22 @@ bytes `58 02 00 00`)。TTL bytes 只出现在 BEGIN payload，不进入 text tot
 02 21 20 00 ff 00 01 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
 ```
 
-### 10.3 `DYNAMIC_CLEAR`
+### 10.3 Keep after execute
+
+下面上传 1-byte text `K`，使用默认 TTL 并设置 `KEEP_AFTER_EXECUTE`。BEGIN
+payload 只有一个 flags byte `01`；成功执行后 committed text 和 TTL 仍然存在，
+直到 TTL、CLEAR、lifecycle clear 或新的上传清除/替换它。
+
+```text
+# DYNAMIC_BEGIN request, request_id=0x25, total=1, default TTL, keep=1
+02 20 25 00 ff 01 00 00 01 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+
+# DYNAMIC_DATA request and final response
+02 21 25 00 ff 01 00 00 01 00 4b 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+02 21 25 00 ff 00 01 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+```
+
+### 10.4 `DYNAMIC_CLEAR`
 
 ```text
 # request_id=0x30
@@ -694,15 +719,15 @@ bytes `58 02 00 00`)。TTL bytes 只出现在 BEGIN payload，不进入 text tot
 02 22 30 00 ff 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
 ```
 
-### 10.4 `CAPABILITIES`
+### 10.5 `CAPABILITIES`
 
 ```text
 # request_id=0x01
 02 23 01 00 ff 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
 
-# response: version=1, object_count=1, flags=0x000f,
+# response: version=1, object_count=1, flags=0x004f,
 # max=256, default=300, min=1, max_ttl=86400, transaction_timeout=30
-02 23 01 00 ff 16 00 00 16 00 01 01 0f 00 00 01 2c 01 00 00 01 00 00 00 80 51 01 00 1e 00 00 00
+02 23 01 00 ff 16 00 00 16 00 01 01 4f 00 00 01 2c 01 00 00 01 00 00 00 80 51 01 00 1e 00 00 00
 ```
 
 旧 v2 firmware 对同一 request 的可识别 response 是：

@@ -106,13 +106,16 @@ DYNAMIC_LIFECYCLE_CLEAR_ON_EXECUTION_ACCEPT = 1 << 2
 DYNAMIC_LIFECYCLE_CLEAR_ON_USB_DISCONNECT = 1 << 3
 DYNAMIC_LIFECYCLE_CLEAR_ON_BLE_PROFILE_CHANGE = 1 << 4
 DYNAMIC_LIFECYCLE_CLEAR_ON_SELECTED_ENDPOINT_CHANGE = 1 << 5
-DYNAMIC_LIFECYCLE_KNOWN_MASK = 0x003F
+DYNAMIC_LIFECYCLE_SUPPORTS_KEEP_AFTER_EXECUTE = 1 << 6
+DYNAMIC_LIFECYCLE_KNOWN_MASK = 0x007F
 DYNAMIC_LIFECYCLE_REQUIRED_MASK = (
     DYNAMIC_LIFECYCLE_CLEAR_ON_BOOT
     | DYNAMIC_LIFECYCLE_CLEAR_ON_TTL_EXPIRY
     | DYNAMIC_LIFECYCLE_CLEAR_ON_EXECUTION_ACCEPT
 )
 DYNAMIC_CAPABILITIES_SIZE = 22
+DYNAMIC_BEGIN_FLAG_KEEP_AFTER_EXECUTE = 1 << 0
+DYNAMIC_BEGIN_KNOWN_FLAGS = DYNAMIC_BEGIN_FLAG_KEEP_AFTER_EXECUTE
 
 STATUS_NAMES = {
     STATUS_OK: "OK",
@@ -492,6 +495,12 @@ class DynamicCapabilities:
             self.lifecycle_flags & DYNAMIC_LIFECYCLE_CLEAR_ON_SELECTED_ENDPOINT_CHANGE
         )
 
+    @property
+    def supports_keep_after_execute(self) -> bool:
+        return bool(
+            self.lifecycle_flags & DYNAMIC_LIFECYCLE_SUPPORTS_KEEP_AFTER_EXECUTE
+        )
+
 
 @dataclass(frozen=True)
 class _PasswordSetTimeout(Exception):
@@ -688,13 +697,21 @@ class RuntimeMacroClient:
         return data
 
     def _upload_dynamic_once(
-        self, data: bytes, ttl_seconds: int | None, request_id: int
+        self,
+        data: bytes,
+        ttl_seconds: int | None,
+        keep_after_execute: bool,
+        request_id: int,
     ) -> None:
-        ttl_payload = (
-            b""
-            if ttl_seconds is None
-            else ttl_seconds.to_bytes(4, "little")
+        begin_flags = (
+            DYNAMIC_BEGIN_FLAG_KEEP_AFTER_EXECUTE if keep_after_execute else 0
         )
+        if ttl_seconds is None:
+            ttl_payload = bytes([begin_flags]) if begin_flags else b""
+        else:
+            ttl_payload = ttl_seconds.to_bytes(4, "little")
+            if begin_flags:
+                ttl_payload += bytes([begin_flags])
         begin = build_frame(
             OPCODE_DYNAMIC_BEGIN,
             request_id,
@@ -721,7 +738,13 @@ class RuntimeMacroClient:
                 response, "DYNAMIC_DATA", offset + len(chunk), len(data)
             )
 
-    def upload_dynamic(self, data: bytes, ttl_seconds: int | None = None) -> None:
+    def upload_dynamic(
+        self,
+        data: bytes,
+        ttl_seconds: int | None = None,
+        *,
+        keep_after_execute: bool = False,
+    ) -> None:
         """Upload dynamic text atomically without exposing a readback API."""
         data = self._validate_dynamic_input(data, ttl_seconds)
         capabilities = self.get_capabilities()
@@ -738,12 +761,18 @@ class RuntimeMacroClient:
                 f"dynamic TTL must be between {capabilities.min_ttl_seconds} and "
                 f"{capabilities.max_ttl_seconds} seconds"
             )
+        if keep_after_execute and not capabilities.supports_keep_after_execute:
+            raise ProtocolError(
+                "firmware does not support keep-after-execute dynamic macros"
+            )
 
         last: Exception | None = None
         for attempt in range(self.retries + 1):
             request_id = self._request_id()
             try:
-                self._upload_dynamic_once(data, ttl_seconds, request_id)
+                self._upload_dynamic_once(
+                    data, ttl_seconds, keep_after_execute, request_id
+                )
                 return
             except (TimeoutError, TransportError) as exc:
                 last = exc
@@ -1151,6 +1180,11 @@ def make_parser() -> argparse.ArgumentParser:
     dynamic_inputs.add_argument("--file", type=Path)
     dynamic_inputs.add_argument("--stdin", action="store_true")
     dynamic_set.add_argument("--ttl", type=parse_int, help="TTL in seconds (1..86400)")
+    dynamic_set.add_argument(
+        "--keep-after-execute",
+        action="store_true",
+        help="keep committed text after the executor accepts it",
+    )
     sub.add_parser("dynamic-clear", help="clear the temporary dynamic macro")
     return parser
 
@@ -1287,11 +1321,19 @@ def main(argv: list[str] | None = None, *, hid_module: Any = None) -> int:
                 )
             elif args.command == "dynamic-set":
                 assert data is not None
-                client.upload_dynamic(data, ttl_seconds=args.ttl)
+                client.upload_dynamic(
+                    data,
+                    ttl_seconds=args.ttl,
+                    keep_after_execute=args.keep_after_execute,
+                )
                 ttl = (
                     DYNAMIC_DEFAULT_TTL_SECONDS if args.ttl is None else args.ttl
                 )
-                print(f"dynamic macro uploaded ({len(data)} bytes, ttl={ttl}s)")
+                policy = "keep" if args.keep_after_execute else "consume"
+                print(
+                    f"dynamic macro uploaded ({len(data)} bytes, ttl={ttl}s, "
+                    f"after_execute={policy})"
+                )
             elif args.command == "dynamic-clear":
                 client.clear_dynamic()
                 print("dynamic macro cleared")

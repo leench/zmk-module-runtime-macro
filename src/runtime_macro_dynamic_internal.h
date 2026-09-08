@@ -28,12 +28,14 @@ struct zmk_runtime_macro_dynamic_state {
     uint8_t committed[ZMK_RUNTIME_MACRO_DYNAMIC_MAX_TEXT_LEN];
     size_t committed_length;
     bool committed_valid;
+    bool committed_consume_on_accept;
 
     uint8_t staging[ZMK_RUNTIME_MACRO_DYNAMIC_MAX_TEXT_LEN];
     size_t staging_expected_length;
     size_t staging_received;
     bool staging_active;
     uint32_t staging_ttl_seconds;
+    bool staging_consume_on_accept;
 
     int64_t ttl_deadline_ms;
     uint32_t ttl_generation;
@@ -62,6 +64,15 @@ void zmk_runtime_macro_dynamic_reset(void);
 int zmk_runtime_macro_dynamic_begin(size_t total_length, uint32_t ttl_seconds);
 
 /*
+ * Start a transaction with an explicit execution policy. When
+ * consume_on_accept is false, successful behavior execution keeps committed
+ * text until TTL, clear, lifecycle clear, or replacement.
+ */
+int zmk_runtime_macro_dynamic_begin_with_options(size_t total_length,
+                                                 uint32_t ttl_seconds,
+                                                 bool consume_on_accept);
+
+/*
  * Append one contiguous chunk. offset must equal the current received count,
  * and length must be 1..(expected - received). Every byte is checked against
  * the existing macro alphabet: 0x20..0x7e, LF, Tab, or Backspace. A bad
@@ -87,8 +98,8 @@ void zmk_runtime_macro_dynamic_check_expiry(void);
 
 /*
  * Try to hand the committed text to the shared executor. Empty or expired
- * dynamic text is harmless and returns 0. The committed text is consumed only
- * when the executor accepts its private snapshot; busy or start failures keep
- * it available for a later press.
+ * dynamic text is harmless and returns 0. By default committed text is
+ * consumed when the executor accepts its private snapshot; an upload may opt
+ * out of consumption. Busy or start failures always keep it available.
  */
 int zmk_runtime_macro_dynamic_execute(void);

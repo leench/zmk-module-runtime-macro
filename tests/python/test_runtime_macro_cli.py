@@ -1147,17 +1147,18 @@ class DynamicClientTests(unittest.TestCase):
             device.read_queue.append(
                 response(
                     request,
-                    payload=dynamic_capabilities_payload(lifecycle_flags=0x3F),
+                    payload=dynamic_capabilities_payload(lifecycle_flags=0x7F),
                     total=22,
                 )
             )
 
         client, device = self.make_client(reply, retries=0)
         capabilities = client.get_capabilities()
-        self.assertEqual(0x3F, capabilities.lifecycle_flags)
+        self.assertEqual(0x7F, capabilities.lifecycle_flags)
         self.assertTrue(capabilities.clear_on_usb_disconnect)
         self.assertTrue(capabilities.clear_on_ble_profile_change)
         self.assertTrue(capabilities.clear_on_selected_endpoint_change)
+        self.assertTrue(capabilities.supports_keep_after_execute)
         self.assertEqual(1, len(device.writes))
 
     def test_capabilities_rejects_unsupported_and_malformed_responses(self):
@@ -1169,7 +1170,7 @@ class DynamicClientTests(unittest.TestCase):
             client.get_capabilities()
 
         for payload in (
-            dynamic_capabilities_payload(lifecycle_flags=0x40),
+            dynamic_capabilities_payload(lifecycle_flags=0x80),
             dynamic_capabilities_payload(max_length=255),
         ):
             with self.subTest(payload=payload):
@@ -1227,6 +1228,71 @@ class DynamicClientTests(unittest.TestCase):
                         for request in seen[1:]
                     )
                 )
+
+    def test_dynamic_upload_keep_after_execute_wire_bytes(self):
+        seen = []
+
+        def reply(device, wire):
+            request = wire[1:]
+            seen.append(request)
+            if request[1] == cli.OPCODE_CAPABILITIES:
+                device.read_queue.append(
+                    response(
+                        request,
+                        payload=dynamic_capabilities_payload(lifecycle_flags=0x4F),
+                        total=22,
+                    )
+                )
+            elif request[1] == cli.OPCODE_DYNAMIC_BEGIN:
+                self.assertEqual(b"\x01", request[10:11])
+                device.read_queue.append(response(request, total=1))
+            else:
+                device.read_queue.append(response(request, offset=1, total=1))
+
+        client, _ = self.make_client(reply, retries=0)
+        client.upload_dynamic(b"Z", keep_after_execute=True)
+        self.assertEqual(b"\x01", seen[1][10:11])
+
+    def test_dynamic_upload_keep_after_execute_with_ttl_wire_bytes(self):
+        seen = []
+
+        def reply(device, wire):
+            request = wire[1:]
+            seen.append(request)
+            if request[1] == cli.OPCODE_CAPABILITIES:
+                device.read_queue.append(
+                    response(
+                        request,
+                        payload=dynamic_capabilities_payload(lifecycle_flags=0x4F),
+                        total=22,
+                    )
+                )
+            elif request[1] == cli.OPCODE_DYNAMIC_BEGIN:
+                self.assertEqual(b"X\x02\x00\x00\x01", request[10:15])
+                device.read_queue.append(response(request, total=1))
+            else:
+                device.read_queue.append(response(request, offset=1, total=1))
+
+        client, _ = self.make_client(reply, retries=0)
+        client.upload_dynamic(b"Z", ttl_seconds=600, keep_after_execute=True)
+        self.assertEqual(b"X\x02\x00\x00\x01", seen[1][10:15])
+
+    def test_dynamic_upload_rejects_keep_on_old_firmware_before_begin(self):
+        def reply(device, wire):
+            request = wire[1:]
+            if request[1] == cli.OPCODE_CAPABILITIES:
+                device.read_queue.append(
+                    response(
+                        request,
+                        payload=dynamic_capabilities_payload(),
+                        total=22,
+                    )
+                )
+
+        client, device = self.make_client(reply, retries=0)
+        with self.assertRaises(cli.ProtocolError):
+            client.upload_dynamic(b"Z", keep_after_execute=True)
+        self.assertEqual(1, len(device.writes))
 
     def test_dynamic_upload_explicit_ttl_wire_bytes(self):
         seen = []
@@ -1399,11 +1465,19 @@ class DynamicClientTests(unittest.TestCase):
 class CliTests(unittest.TestCase):
     def test_cli_parses_dynamic_commands_and_ttl(self):
         args = cli.make_parser().parse_args(
-            ["dynamic-set", "--text", "hello", "--ttl", "600"]
+            [
+                "dynamic-set",
+                "--text",
+                "hello",
+                "--ttl",
+                "600",
+                "--keep-after-execute",
+            ]
         )
         self.assertEqual("dynamic-set", args.command)
         self.assertEqual("hello", args.text)
         self.assertEqual(600, args.ttl)
+        self.assertTrue(args.keep_after_execute)
         self.assertEqual(
             "capabilities", cli.make_parser().parse_args(["capabilities"]).command
         )
