@@ -975,7 +975,8 @@ Phase 7 已实现，范围严格限定为参考 Python client/CLI，没有修改
 `python3 -m py_compile tools/runtime_macro_cli.py tests/python/test_runtime_macro_cli.py` 通过，
 `ruff check tools/runtime_macro_cli.py tests/python/test_runtime_macro_cli.py` 通过，
 `git diff --check` 通过。修改文件为 `tools/runtime_macro_cli.py`、`tests/python/test_runtime_macro_cli.py`、
-`docs/CLI.md` 和本计划文档。Phase 8 继续负责桌面应用实施文档、跨组件集成和最终硬件验证。
+`docs/CLI.md`、`docs/DYNAMIC_DESKTOP_APP_SPEC.md` 和本计划文档。桌面应用实施规范已作为
+Phase 7 交接产物输出；Phase 8 继续负责桌面应用跨组件集成、实物验证和最终文档回归。
 
 ---
 
