@@ -84,3 +84,11 @@ void zmk_runtime_macro_dynamic_clear(void);
  * also used by later lifecycle code before observing dynamic state.
  */
 void zmk_runtime_macro_dynamic_check_expiry(void);
+
+/*
+ * Try to hand the committed text to the shared executor. Empty or expired
+ * dynamic text is harmless and returns 0. The committed text is consumed only
+ * when the executor accepts its private snapshot; busy or start failures keep
+ * it available for a later press.
+ */
+int zmk_runtime_macro_dynamic_execute(void);

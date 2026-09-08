@@ -20,6 +20,7 @@
 #define CONFIG_ZMK_LOG_LEVEL 0
 #define CONFIG_ZMK_RUNTIME_MACRO_SLOT_COUNT 2
 #define CONFIG_ZMK_RUNTIME_MACRO_MAX_TEXT_LEN 8
+#define CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC 1
 #define CONFIG_ZMK_RUNTIME_MACRO_TAP_MS 10
 #define CONFIG_ZMK_RUNTIME_MACRO_WAIT_MS 20
 #define CONFIG_ZMK_MACRO_DEFAULT_TAP_MS CONFIG_ZMK_RUNTIME_MACRO_TAP_MS
@@ -45,6 +46,7 @@ static struct captured_event events[32];
 #include "../../src/runtime_macro_ascii.c"
 #include "../../src/runtime_macro.c"
 #include "../../src/runtime_macro_executor.c"
+#include "../../src/runtime_macro_dynamic.c"
 
 static int failures;
 
@@ -109,6 +111,16 @@ int raise_zmk_keycode_state_changed_from_encoded(uint32_t encoded, bool pressed,
     return 0;
 }
 
+static bool all_zero(const uint8_t *buffer, size_t length) {
+    for (size_t index = 0U; index < length; index++) {
+        if (buffer[index] != 0U) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 static void reset_test_state(void) {
     save_result = 0;
     delete_result = 0;
@@ -120,7 +132,13 @@ static void reset_test_state(void) {
     host_uptime = 1000;
     memset(events, 0, sizeof(events));
     runtime_macro_executor_work.scheduled = false;
+    runtime_macro_dynamic_ttl_work.scheduled = false;
+    zmk_runtime_macro_dynamic_reset();
     atomic_set(&runtime_macro_executor_busy, 0);
+    memset(runtime_macro_executor.text, 0, sizeof(runtime_macro_executor.text));
+    runtime_macro_executor.length = 0U;
+    runtime_macro_executor.index = 0U;
+    runtime_macro_executor.encoded = 0U;
 }
 
 static uint32_t expected_keycode(uint8_t usage, bool shifted) {
@@ -421,6 +439,8 @@ static void test_event_errors_and_schedule_failure(void) {
     EXPECT_EQ(1, schedule_calls);
     EXPECT_EQ(0, event_count);
     EXPECT_TRUE(!zmk_runtime_macro_is_busy());
+    EXPECT_TRUE(all_zero((const uint8_t *)runtime_macro_executor.text,
+                         sizeof(runtime_macro_executor.text)));
 
     reset_test_state();
     set_slot(0, "x");
@@ -431,6 +451,8 @@ static void test_event_errors_and_schedule_failure(void) {
     run_work_once(CONFIG_ZMK_MACRO_DEFAULT_TAP_MS);
     EXPECT_EQ(2, event_count);
     EXPECT_TRUE(!zmk_runtime_macro_is_busy());
+    EXPECT_TRUE(all_zero((const uint8_t *)runtime_macro_executor.text,
+                         sizeof(runtime_macro_executor.text)));
 
     reset_test_state();
     set_slot(0, "xy");
@@ -442,6 +464,8 @@ static void test_event_errors_and_schedule_failure(void) {
     run_work_once(CONFIG_ZMK_MACRO_DEFAULT_TAP_MS);
     EXPECT_EQ(4, event_count);
     EXPECT_TRUE(!zmk_runtime_macro_is_busy());
+    EXPECT_TRUE(all_zero((const uint8_t *)runtime_macro_executor.text,
+                         sizeof(runtime_macro_executor.text)));
 
     reset_test_state();
     set_slot(0, "x");
@@ -451,6 +475,8 @@ static void test_event_errors_and_schedule_failure(void) {
     EXPECT_EQ(2, event_count);
     EXPECT_TRUE(!runtime_macro_executor_work.scheduled);
     EXPECT_TRUE(!zmk_runtime_macro_is_busy());
+    EXPECT_TRUE(all_zero((const uint8_t *)runtime_macro_executor.text,
+                         sizeof(runtime_macro_executor.text)));
 
     reset_test_state();
     set_slot(0, "xy");
@@ -463,6 +489,128 @@ static void test_event_errors_and_schedule_failure(void) {
     expect_event(1, 'x', false, 1000);
     EXPECT_TRUE(!runtime_macro_executor_work.scheduled);
     EXPECT_TRUE(!zmk_runtime_macro_is_busy());
+    EXPECT_TRUE(all_zero((const uint8_t *)runtime_macro_executor.text,
+                         sizeof(runtime_macro_executor.text)));
+
+    reset_test_state();
+    set_slot(0, "x");
+    EXPECT_EQ(0, zmk_runtime_macro_execute(0));
+    runtime_macro_executor.text[0] = '\0';
+    run_work_once(K_NO_WAIT);
+    EXPECT_TRUE(!zmk_runtime_macro_is_busy());
+    EXPECT_TRUE(all_zero((const uint8_t *)runtime_macro_executor.text,
+                         sizeof(runtime_macro_executor.text)));
+}
+
+static void commit_dynamic(const uint8_t *text, size_t length,
+                           uint32_t ttl_seconds) {
+    EXPECT_EQ(0, zmk_runtime_macro_dynamic_begin(length, ttl_seconds));
+    EXPECT_EQ(0, zmk_runtime_macro_dynamic_append(0U, text, length));
+}
+
+static void expect_dynamic_committed(const uint8_t *expected, size_t length) {
+    EXPECT_TRUE(runtime_macro_dynamic_state.committed_valid);
+    EXPECT_EQ(length, runtime_macro_dynamic_state.committed_length);
+    EXPECT_EQ(0, memcmp(expected, runtime_macro_dynamic_state.committed, length));
+}
+
+static void run_executor_to_completion(size_t length) {
+    run_work_once(K_NO_WAIT);
+    for (size_t index = 0U; index < length; index++) {
+        run_work_once(CONFIG_ZMK_RUNTIME_MACRO_TAP_MS);
+        if (index + 1U < length) {
+            run_work_once(CONFIG_ZMK_RUNTIME_MACRO_WAIT_MS);
+        }
+    }
+}
+
+static void test_dynamic_snapshot_and_consume(void) {
+    uint8_t text[ZMK_RUNTIME_MACRO_DYNAMIC_MAX_TEXT_LEN];
+
+    memset(text, 'd', sizeof(text));
+    reset_test_state();
+    commit_dynamic(text, sizeof(text), 300U);
+    EXPECT_EQ(1, schedule_calls); /* Dynamic TTL work. */
+    EXPECT_EQ(0, zmk_runtime_macro_dynamic_execute());
+    EXPECT_TRUE(!runtime_macro_dynamic_state.committed_valid);
+    EXPECT_EQ(0, runtime_macro_dynamic_state.ttl_deadline_ms);
+    EXPECT_TRUE(!runtime_macro_dynamic_ttl_work.scheduled);
+    EXPECT_TRUE(zmk_runtime_macro_is_busy());
+    EXPECT_EQ(sizeof(text), runtime_macro_executor.length);
+    EXPECT_EQ(0, memcmp(text, runtime_macro_executor.text, sizeof(text)));
+
+    run_executor_to_completion(sizeof(text));
+    EXPECT_TRUE(!zmk_runtime_macro_is_busy());
+    EXPECT_TRUE(all_zero((const uint8_t *)runtime_macro_executor.text,
+                         sizeof(runtime_macro_executor.text)));
+}
+
+static void test_dynamic_empty_expired_and_busy(void) {
+    const uint8_t dynamic_text[] = "dynamic";
+
+    reset_test_state();
+    EXPECT_EQ(0, zmk_runtime_macro_dynamic_execute());
+    EXPECT_EQ(0, schedule_calls);
+    EXPECT_EQ(0, event_count);
+
+    commit_dynamic(dynamic_text, sizeof(dynamic_text) - 1U, 1U);
+    host_uptime += 1000;
+    EXPECT_EQ(0, zmk_runtime_macro_dynamic_execute());
+    EXPECT_TRUE(!runtime_macro_dynamic_state.committed_valid);
+    EXPECT_EQ(0, event_count);
+    EXPECT_TRUE(!zmk_runtime_macro_is_busy());
+
+    reset_test_state();
+    set_slot(0, "s");
+    commit_dynamic(dynamic_text, sizeof(dynamic_text) - 1U, 300U);
+    EXPECT_EQ(0, zmk_runtime_macro_execute(0));
+    EXPECT_EQ(-EBUSY, zmk_runtime_macro_dynamic_execute());
+    expect_dynamic_committed(dynamic_text, sizeof(dynamic_text) - 1U);
+    run_executor_to_completion(1U);
+
+    reset_test_state();
+    set_slot(0, "s");
+    commit_dynamic(dynamic_text, sizeof(dynamic_text) - 1U, 300U);
+    EXPECT_EQ(0, zmk_runtime_macro_dynamic_execute());
+    EXPECT_EQ(-EBUSY, zmk_runtime_macro_execute(0));
+    EXPECT_TRUE(!runtime_macro_dynamic_state.committed_valid);
+    run_executor_to_completion(sizeof(dynamic_text) - 1U);
+}
+
+static void test_dynamic_replacement_and_start_failure(void) {
+    const uint8_t old_text[] = "old dynamic";
+    const uint8_t new_text[] = "new dynamic";
+
+    reset_test_state();
+    commit_dynamic(old_text, sizeof(old_text) - 1U, 300U);
+    EXPECT_EQ(0, zmk_runtime_macro_dynamic_execute());
+    commit_dynamic(new_text, sizeof(new_text) - 1U, 300U);
+    expect_dynamic_committed(new_text, sizeof(new_text) - 1U);
+    run_executor_to_completion(sizeof(old_text) - 1U);
+    expect_dynamic_committed(new_text, sizeof(new_text) - 1U);
+
+    reset_test_state();
+    commit_dynamic(old_text, sizeof(old_text) - 1U, 300U);
+    schedule_failure_call = 1; /* Call 0 was the dynamic TTL schedule. */
+    EXPECT_EQ(-EIO, zmk_runtime_macro_dynamic_execute());
+    expect_dynamic_committed(old_text, sizeof(old_text) - 1U);
+    EXPECT_TRUE(!zmk_runtime_macro_is_busy());
+    EXPECT_TRUE(all_zero((const uint8_t *)runtime_macro_executor.text,
+                         sizeof(runtime_macro_executor.text)));
+    EXPECT_TRUE(runtime_macro_dynamic_ttl_work.scheduled);
+}
+
+static void test_dynamic_event_error_and_snapshot_reset(void) {
+    const uint8_t text[] = "event error";
+
+    reset_test_state();
+    commit_dynamic(text, sizeof(text) - 1U, 300U);
+    EXPECT_EQ(0, zmk_runtime_macro_dynamic_execute());
+    raise_error_call = 0;
+    run_executor_to_completion(sizeof(text) - 1U);
+    EXPECT_TRUE(!zmk_runtime_macro_is_busy());
+    EXPECT_TRUE(all_zero((const uint8_t *)runtime_macro_executor.text,
+                         sizeof(runtime_macro_executor.text)));
 }
 
 int main(void) {
@@ -471,6 +619,10 @@ int main(void) {
     test_controls_and_maximum_length();
     test_empty_slot_and_busy_recovery();
     test_event_errors_and_schedule_failure();
+    test_dynamic_snapshot_and_consume();
+    test_dynamic_empty_expired_and_busy();
+    test_dynamic_replacement_and_start_failure();
+    test_dynamic_event_error_and_snapshot_reset();
 
     if (failures != 0) {
         fprintf(stderr, "%d test assertion(s) failed\n", failures);

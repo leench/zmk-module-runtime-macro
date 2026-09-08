@@ -16,6 +16,7 @@
 #include <zmk/runtime_macro.h>
 
 #include "runtime_macro_dynamic_internal.h"
+#include "runtime_macro_executor_internal.h"
 
 static struct zmk_runtime_macro_dynamic_state
     runtime_macro_dynamic_state __attribute__((used));
@@ -246,6 +247,31 @@ void zmk_runtime_macro_dynamic_check_expiry(void) {
     (void)k_mutex_lock(&runtime_macro_dynamic_mutex, K_FOREVER);
     runtime_macro_dynamic_expire_locked(k_uptime_get());
     (void)k_mutex_unlock(&runtime_macro_dynamic_mutex);
+}
+
+int zmk_runtime_macro_dynamic_execute(void) {
+    int err = 0;
+
+    (void)k_mutex_lock(&runtime_macro_dynamic_mutex, K_FOREVER);
+    runtime_macro_dynamic_expire_locked(k_uptime_get());
+
+    if (!runtime_macro_dynamic_state.committed_valid ||
+        runtime_macro_dynamic_state.committed_length == 0U) {
+        goto out;
+    }
+
+    err = zmk_runtime_macro_executor_start(
+        runtime_macro_dynamic_state.committed,
+        runtime_macro_dynamic_state.committed_length);
+    if (err == 0) {
+        /* The executor now owns an independent snapshot. */
+        runtime_macro_dynamic_clear_committed_locked();
+        runtime_macro_dynamic_cancel_ttl_locked();
+    }
+
+out:
+    (void)k_mutex_unlock(&runtime_macro_dynamic_mutex);
+    return err;
 }
 
 static int __attribute__((unused)) runtime_macro_dynamic_init(void) {

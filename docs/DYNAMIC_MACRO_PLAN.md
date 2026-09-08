@@ -503,6 +503,60 @@ accept 和失败保留语义；不得新增 dynamic 专用 worker 或第二个�
 - 行为返回值与消费结果一一对应；
 - map 中不存在意外的额外 256-byte 长期缓冲区。
 
+### 8.6 Phase 3 实际完成记录
+
+Phase 3 已完成。静态和 dynamic 文本现在共用同一个 executor busy 状态、同一个
+`k_work_delayable` 和同一个 executor-owned snapshot；本阶段未修改 behavior、
+protocol、USB 或 lifecycle。
+
+#### 共享入口与消费语义
+
+- 新增私有 `zmk_runtime_macro_executor_start()`，统一处理输入容量检查、全局
+  busy CAS、snapshot copy、初始 work schedule 和失败恢复。
+- 静态 `zmk_runtime_macro_execute(slot)` 保持先做现有 slot snapshot，再调用共享
+  入口；static slot API 和现有返回行为不变。
+- 新增私有 `zmk_runtime_macro_dynamic_execute()`：先持 dynamic store mutex 检查
+  TTL/empty，再把 committed bytes 单向交给共享 executor。只有 start 返回 accepted
+  后才清 committed 和 TTL；`-EBUSY` 或 schedule/start error 保留 committed。
+- executor snapshot 在 feature on 时扩展到 256 bytes + terminator；feature off
+  仍使用 static `CONFIG_ZMK_RUNTIME_MACRO_MAX_TEXT_LEN` 容量。
+- executor 完成、invalid byte、event/schedule error 和 start failure 路径均先
+  zeroize 全部 snapshot，再释放 busy。executor 不回调 dynamic store，避免锁反转。
+- accepted 后 dynamic store 可立即被新 upload/clear；executor 使用独立 snapshot，
+  不受后续 store 生命周期影响。
+
+#### 测试与构建记录
+
+- executor host test 新增 256-byte snapshot、static/dynamic 双向 busy、consume-on-
+  accept、busy/start-error 保留、accepted 后 replacement、TTL/empty、event error
+  和 snapshot zeroize 覆盖；既有 static ASCII/control/timing/schedule tests 全部
+  保持通过。
+- 在 `zmk-dev` devcontainer 内运行 `CLANG=gcc ./tests/host/run.sh`：GCC、sanitizer、
+  替代 Clang 及既有 store/protocol/auth/USB tests 全部通过；`git diff --check`
+  通过。
+- dynamic/executor object 没有新增 Settings/NVS/static-slot 未解析依赖。
+
+当前 Totem dongle 实测：
+
+| 构建 | Flash | RAM | map 关键状态 |
+|---|---:|---:|---|
+| Phase 3 off | 429632 B | 193278 B / 262144 B（73.73%） | dynamic state absent |
+| Phase 3 on | 430212 B | 194086 B / 262144 B（74.04%） | dynamic state `0x228`；executor state `0x114` |
+
+相对 Phase 3 off，dynamic on 总增量为 Flash `+580 B`、RAM `+808 B`，剩余 RAM
+为 `68058 B`。相对 Phase 2 on，executor 改造新增约 `+96 B Flash`、`+192 B RAM`，
+正好对应 executor metadata/容量扩展和共享入口代码。两次 build 均成功链接，只有
+既有 `leen-display` `ZMK_TRANSPORT_NONE` warning，未触发阶段停止条件。
+
+#### 阶段边界与后续衔接
+
+本阶段修改文件为：`src/runtime_macro_executor.c`、
+`src/runtime_macro_executor_internal.h`、`src/runtime_macro_dynamic.c`、
+`src/runtime_macro_dynamic_internal.h`、`tests/host/runtime_macro_executor_test.c`
+和 `tests/host/runtime_macro_dynamic_store_test.c`。下一阶段只可在用户确认后新增
+`&runtime_macro_dynamic` zero-parameter、central-only behavior；不得在 behavior 中
+硬编码 USB/BLE 输出，也不得新增 executor 或 protocol execute opcode。
+
 ---
 
 ## 9. 阶段 4：`&runtime_macro_dynamic` keymap behavior

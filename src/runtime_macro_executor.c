@@ -17,6 +17,16 @@
 #include <zmk/events/keycode_state_changed.h>
 #include <zmk/runtime_macro.h>
 
+#include "runtime_macro_executor_internal.h"
+
+#if defined(CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC) && CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC
+#include "runtime_macro_dynamic_internal.h"
+#define RUNTIME_MACRO_EXECUTOR_MAX_TEXT_LEN \
+    ZMK_RUNTIME_MACRO_DYNAMIC_MAX_TEXT_LEN
+#else
+#define RUNTIME_MACRO_EXECUTOR_MAX_TEXT_LEN CONFIG_ZMK_RUNTIME_MACRO_MAX_TEXT_LEN
+#endif
+
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 enum runtime_macro_executor_phase {
@@ -25,12 +35,21 @@ enum runtime_macro_executor_phase {
 };
 
 struct runtime_macro_executor_state {
-    char text[CONFIG_ZMK_RUNTIME_MACRO_MAX_TEXT_LEN + 1];
+    char text[RUNTIME_MACRO_EXECUTOR_MAX_TEXT_LEN + 1];
     size_t length;
     size_t index;
     uint32_t encoded;
     enum runtime_macro_executor_phase phase;
 };
+
+_Static_assert(RUNTIME_MACRO_EXECUTOR_MAX_TEXT_LEN >=
+                   CONFIG_ZMK_RUNTIME_MACRO_MAX_TEXT_LEN,
+               "executor capacity must hold every static macro");
+#if defined(CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC) && CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC
+_Static_assert(RUNTIME_MACRO_EXECUTOR_MAX_TEXT_LEN >=
+                   ZMK_RUNTIME_MACRO_DYNAMIC_MAX_TEXT_LEN,
+               "executor capacity must hold every dynamic macro");
+#endif
 
 static struct runtime_macro_executor_state runtime_macro_executor;
 static atomic_t runtime_macro_executor_busy;
@@ -39,9 +58,21 @@ static void runtime_macro_executor_work_handler(struct k_work *work);
 
 K_WORK_DELAYABLE_DEFINE(runtime_macro_executor_work, runtime_macro_executor_work_handler);
 
+static void runtime_macro_executor_zeroize(void *buffer, size_t length) {
+    volatile uint8_t *bytes = (volatile uint8_t *)buffer;
+
+    while (length-- > 0U) {
+        *bytes++ = 0U;
+    }
+}
+
 static void runtime_macro_executor_finish(void) {
+    runtime_macro_executor_zeroize(runtime_macro_executor.text,
+                                   sizeof(runtime_macro_executor.text));
     runtime_macro_executor.length = 0;
     runtime_macro_executor.index = 0;
+    runtime_macro_executor.encoded = 0U;
+    runtime_macro_executor.phase = RUNTIME_MACRO_EXECUTOR_PRESS;
     atomic_set(&runtime_macro_executor_busy, 0);
 }
 
@@ -116,6 +147,37 @@ static void runtime_macro_executor_work_handler(struct k_work *work) {
     }
 }
 
+int zmk_runtime_macro_executor_start(const uint8_t *text, size_t length) {
+    if ((text == NULL && length != 0U) ||
+        length > RUNTIME_MACRO_EXECUTOR_MAX_TEXT_LEN) {
+        return -EINVAL;
+    }
+
+    if (!atomic_cas(&runtime_macro_executor_busy, 0, 1)) {
+        return -EBUSY;
+    }
+
+    if (length == 0U) {
+        runtime_macro_executor_finish();
+        return 0;
+    }
+
+    memcpy(runtime_macro_executor.text, text, length);
+    runtime_macro_executor.text[length] = '\0';
+    runtime_macro_executor.length = length;
+    runtime_macro_executor.index = 0;
+    runtime_macro_executor.phase = RUNTIME_MACRO_EXECUTOR_PRESS;
+
+    int err = k_work_schedule(&runtime_macro_executor_work, K_NO_WAIT);
+    if (err < 0) {
+        LOG_ERR("Failed to start runtime macro work (err %d)", err);
+        runtime_macro_executor_finish();
+        return err;
+    }
+
+    return 0;
+}
+
 int zmk_runtime_macro_execute(uint8_t slot) {
     char snapshot[CONFIG_ZMK_RUNTIME_MACRO_MAX_TEXT_LEN + 1];
     size_t length;
@@ -125,28 +187,7 @@ int zmk_runtime_macro_execute(uint8_t slot) {
         return err;
     }
 
-    if (!atomic_cas(&runtime_macro_executor_busy, 0, 1)) {
-        return -EBUSY;
-    }
-
-    if (length == 0) {
-        atomic_set(&runtime_macro_executor_busy, 0);
-        return 0;
-    }
-
-    memcpy(runtime_macro_executor.text, snapshot, length + 1);
-    runtime_macro_executor.length = length;
-    runtime_macro_executor.index = 0;
-    runtime_macro_executor.phase = RUNTIME_MACRO_EXECUTOR_PRESS;
-
-    err = k_work_schedule(&runtime_macro_executor_work, K_NO_WAIT);
-    if (err < 0) {
-        LOG_ERR("Failed to start runtime macro work (err %d)", err);
-        runtime_macro_executor_finish();
-        return err;
-    }
-
-    return 0;
+    return zmk_runtime_macro_executor_start((const uint8_t *)snapshot, length);
 }
 
 bool zmk_runtime_macro_is_busy(void) { return atomic_get(&runtime_macro_executor_busy) != 0; }

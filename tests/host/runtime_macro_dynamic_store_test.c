@@ -20,6 +20,13 @@
 #include "../../src/runtime_macro_ascii.c"
 #include "../../src/runtime_macro_dynamic.c"
 
+/* Phase-2 store tests do not exercise executor handoff. */
+int zmk_runtime_macro_executor_start(const uint8_t *text, size_t length) {
+    (void)text;
+    (void)length;
+    return -ENOSYS;
+}
+
 int64_t host_uptime;
 
 int host_work_schedule(struct k_work_delayable *work, k_timeout_t delay,
