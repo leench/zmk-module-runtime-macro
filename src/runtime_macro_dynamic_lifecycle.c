@@ -13,6 +13,11 @@
 
 #include "runtime_macro_dynamic_internal.h"
 
+/*
+ * Lifecycle clears are whole-state operations: every dynamic slot, the shared
+ * staging transaction, and all TTL deadlines. They must stay independent of
+ * the authentication and Settings-backed static paths.
+ */
 static int runtime_macro_dynamic_profile_listener(const zmk_event_t *eh) {
   if (eh == NULL) {
     return -EINVAL;
@@ -20,7 +25,7 @@ static int runtime_macro_dynamic_profile_listener(const zmk_event_t *eh) {
 
 #if defined(CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_BLE_PROFILE_CHANGE) && \
     CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_BLE_PROFILE_CHANGE
-  zmk_runtime_macro_dynamic_clear();
+  zmk_runtime_macro_dynamic_clear_all();
 #endif
 
   return 0;
@@ -33,7 +38,7 @@ static int runtime_macro_dynamic_endpoint_listener(const zmk_event_t *eh) {
 
 #if defined(CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_ENDPOINT_CHANGE) && \
     CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_ENDPOINT_CHANGE
-  zmk_runtime_macro_dynamic_clear();
+  zmk_runtime_macro_dynamic_clear_all();
 #endif
 
   return 0;

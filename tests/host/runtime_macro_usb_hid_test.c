@@ -901,6 +901,25 @@ static void test_event_raw_mapping_consistency(void) {
   EXPECT_EQ(101, last_write_data[2]);
 }
 
+static void commit_dynamic_slot_text(uint8_t slot, const char *text) {
+  size_t length = strlen(text);
+  EXPECT_EQ(0, zmk_runtime_macro_dynamic_begin_slot(
+                   slot, length, ZMK_RUNTIME_MACRO_DYNAMIC_DEFAULT_TTL_SECONDS,
+                   true));
+  EXPECT_EQ(0, zmk_runtime_macro_dynamic_append_slot(
+                   slot, 0U, (const uint8_t *)text, length));
+}
+
+static void expect_dynamic_slot_text(uint8_t slot, const char *text) {
+  size_t length = strlen(text);
+  EXPECT_TRUE(runtime_macro_dynamic_state.slots[slot].committed_valid);
+  EXPECT_EQ(length, runtime_macro_dynamic_state.slots[slot].committed_length);
+  EXPECT_TRUE(memcmp(runtime_macro_dynamic_state.slots[slot].committed, text,
+                     length) == 0);
+}
+
+#if CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_USB_DISCONNECT
+/* Legacy single-object entry points stay covered by this policy-on fixture. */
 static void commit_dynamic_test_text(const char *text) {
   size_t length = strlen(text);
   EXPECT_EQ(0, zmk_runtime_macro_dynamic_begin(
@@ -913,10 +932,19 @@ static void expect_dynamic_test_text(const char *text) {
   size_t length = strlen(text);
   EXPECT_TRUE(runtime_macro_dynamic_state.slots[0U].committed_valid);
   EXPECT_EQ(length, runtime_macro_dynamic_state.slots[0U].committed_length);
-  EXPECT_TRUE(memcmp(runtime_macro_dynamic_state.slots[0U].committed, text, length) == 0);
+  EXPECT_TRUE(memcmp(runtime_macro_dynamic_state.slots[0U].committed, text,
+                     length) == 0);
 }
 
-#if CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_USB_DISCONNECT
+static void expect_all_dynamic_slots_empty(void) {
+  for (uint8_t slot = 0U;
+       slot < (uint8_t)ZMK_RUNTIME_MACRO_DYNAMIC_SLOT_COUNT; slot++) {
+    EXPECT_TRUE(!runtime_macro_dynamic_state.slots[slot].committed_valid);
+    EXPECT_EQ(0, runtime_macro_dynamic_state.slots[slot].committed_length);
+    EXPECT_EQ(0, runtime_macro_dynamic_state.slots[slot].ttl_deadline_ms);
+  }
+}
+
 static void test_dynamic_disconnect_policy_and_generation_race(void) {
   struct zmk_usb_conn_state_changed event = {.conn_state = ZMK_USB_CONN_NONE};
 
@@ -1020,6 +1048,80 @@ static void test_dynamic_disconnect_policy_and_generation_race(void) {
   EXPECT_TRUE(memcmp(static_text, "static", 6) == 0);
 }
 
+/*
+ * Multi-slot boundary of the same policy: every slot holds text and one
+ * shared upload is in progress. Non-disconnect notifications keep all of it,
+ * while a confirmed actual disconnect clears every slot, the staging
+ * transaction, and the pending TTL work without touching the static store.
+ */
+static void test_dynamic_disconnect_clears_every_slot(void) {
+  struct zmk_usb_conn_state_changed event = {.conn_state = ZMK_USB_CONN_NONE};
+  const enum usb_dc_status_code keep_statuses[] = {
+      USB_DC_SUSPEND,
+      USB_DC_RESUME,
+      USB_DC_UNKNOWN,
+  };
+  const enum zmk_usb_conn_state keep_events[] = {
+      ZMK_USB_CONN_HID,
+      ZMK_USB_CONN_HID,
+      ZMK_USB_CONN_NONE,
+  };
+
+  reset_transport();
+  runtime_macro_usb_hid_dev = &hid1;
+  EXPECT_EQ(0, zmk_runtime_macro_slot_set(0, "static", 6));
+  const unsigned int saves_before = save_calls;
+
+  for (uint8_t slot = 0U;
+       slot < (uint8_t)ZMK_RUNTIME_MACRO_DYNAMIC_SLOT_COUNT; slot++) {
+    commit_dynamic_slot_text(slot, "kept");
+  }
+  EXPECT_EQ(0, zmk_runtime_macro_dynamic_begin_slot(
+                   3U, 4U, ZMK_RUNTIME_MACRO_DYNAMIC_DEFAULT_TTL_SECONDS,
+                   true));
+  EXPECT_EQ(0, zmk_runtime_macro_dynamic_append_slot(3U, 0U,
+                                                     (const uint8_t *)"ab",
+                                                     2U));
+  EXPECT_TRUE(runtime_macro_dynamic_state.staging_active);
+  EXPECT_TRUE(runtime_macro_dynamic_ttl_work.scheduled);
+
+  for (size_t index = 0U;
+       index < sizeof(keep_statuses) / sizeof(keep_statuses[0]); index++) {
+    usb_status = keep_statuses[index];
+    event.conn_state = keep_events[index];
+    EXPECT_EQ(0, runtime_macro_usb_hid_conn_state_listener(
+                     (const zmk_event_t *)&event));
+    for (uint8_t slot = 0U;
+         slot < (uint8_t)ZMK_RUNTIME_MACRO_DYNAMIC_SLOT_COUNT; slot++) {
+      expect_dynamic_slot_text(slot, "kept");
+    }
+    /* Every USB notification is a logical protocol boundary, so the shared
+     * upload is discarded while all committed slots survive. */
+    EXPECT_TRUE(!runtime_macro_dynamic_state.staging_active);
+    EXPECT_EQ(0, runtime_macro_dynamic_state.staging_received);
+    EXPECT_TRUE(runtime_macro_dynamic_ttl_work.scheduled);
+  }
+  EXPECT_EQ(saves_before, save_calls);
+
+  usb_status = USB_DC_DISCONNECTED;
+  event.conn_state = ZMK_USB_CONN_NONE;
+  EXPECT_EQ(0, runtime_macro_usb_hid_conn_state_listener(
+                   (const zmk_event_t *)&event));
+
+  expect_all_dynamic_slots_empty();
+  EXPECT_TRUE(!runtime_macro_dynamic_state.staging_active);
+  EXPECT_EQ(0, runtime_macro_dynamic_state.staging_received);
+  EXPECT_TRUE(!runtime_macro_dynamic_ttl_work.scheduled);
+  EXPECT_EQ(saves_before, save_calls);
+
+  char static_text[8];
+  size_t static_length = 0U;
+  EXPECT_EQ(0, zmk_runtime_macro_slot_copy(0, static_text, sizeof(static_text),
+                                           &static_length));
+  EXPECT_EQ(6, static_length);
+  EXPECT_TRUE(memcmp(static_text, "static", 6) == 0);
+}
+
 #else
 static void test_dynamic_disconnect_policy_disabled(void) {
   struct zmk_usb_conn_state_changed event = {
@@ -1041,12 +1143,22 @@ static void test_dynamic_disconnect_policy_disabled(void) {
 
   for (size_t index = 0U; index < sizeof(statuses) / sizeof(statuses[0]);
        index++) {
-    commit_dynamic_test_text("kept");
+    for (uint8_t slot = 0U;
+         slot < (uint8_t)ZMK_RUNTIME_MACRO_DYNAMIC_SLOT_COUNT; slot++) {
+      commit_dynamic_slot_text(slot, "kept");
+    }
+    EXPECT_TRUE(runtime_macro_dynamic_ttl_work.scheduled);
+
     event.conn_state = events[index];
     usb_status = statuses[index];
     EXPECT_EQ(0, runtime_macro_usb_hid_conn_state_listener(
                      (const zmk_event_t *)&event));
-    expect_dynamic_test_text("kept");
+
+    for (uint8_t slot = 0U;
+         slot < (uint8_t)ZMK_RUNTIME_MACRO_DYNAMIC_SLOT_COUNT; slot++) {
+      expect_dynamic_slot_text(slot, "kept");
+    }
+    EXPECT_TRUE(runtime_macro_dynamic_ttl_work.scheduled);
   }
 }
 #endif
@@ -1087,6 +1199,7 @@ int main(void) {
   test_event_raw_mapping_consistency();
 #if CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_USB_DISCONNECT
   test_dynamic_disconnect_policy_and_generation_race();
+  test_dynamic_disconnect_clears_every_slot();
 #else
   test_dynamic_disconnect_policy_disabled();
 #endif

@@ -189,9 +189,11 @@ static void runtime_macro_usb_hid_transport_reset(
   /* Generation increment, protocol discard, and queue purge happen before
    * this clear while holding the transport mutex. A callback racing the
    * boundary therefore carries the old generation and cannot commit after a
-   * real disconnect. */
+   * real disconnect. This clears every dynamic slot, the shared staging
+   * transaction, and all TTL deadlines; it stays independent of the static
+   * store and the auth reset above. */
   if (actual_management_usb_disconnect) {
-    zmk_runtime_macro_dynamic_clear();
+    zmk_runtime_macro_dynamic_clear_all();
   }
 #endif
 

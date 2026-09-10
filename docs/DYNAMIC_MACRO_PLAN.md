@@ -1237,8 +1237,8 @@ Phase 8 收尾；`RAM/Flash 最终数据已记录` 一项保持未勾选，13.5 
 - 优先使用共享 staging buffer，重新评估 RAM、wire compatibility 和测试矩阵。
 
 多槽位目标设计已在 [`DYNAMIC_MULTISLOT_PLAN.md`](DYNAMIC_MULTISLOT_PLAN.md) 中冻结
-（D0 设计冻结；D1 多槽 store、D2 512-byte executor/参数化 behavior、D3 v2 wire
-已实现，见该文档第 13–15 节）。已确认的关键决策：
+（D0 设计冻结；D1 多槽 store、D2 512-byte executor/参数化 behavior、D3 v2 wire、
+D4 多槽 lifecycle clear 已实现，见该文档第 13–16 节）。已确认的关键决策：
 
 - 破坏式升级：直接修改现有 `CAPABILITIES (0x23)`，不保留旧客户端/旧固件兼容；
 - dynamic opcode 的 `slot` 只接受 `0..7`，`0xff` 返回 `BAD_SLOT`；
@@ -1247,7 +1247,9 @@ Phase 8 收尾；`RAM/Flash 最终数据已记录` 一项保持未勾选，13.5 
 - 继续无 dynamic readback，且仍为单 active upload、单 executor、全局互斥；
 - 仍只允许非秘密临时文本，安全边界不放宽。
 
-firmware 的 **wire 行为**已升级为 8 槽、最大 512 bytes：D1 已落地 RAM 多槽 store，
-D2 已落地 512-byte executor、参数化 `&runtime_macro_dynamic <slot>` behavior 和
-Totem keymap 迁移，D3 已落地 capability v2 与逐槽 dynamic protocol。Python/CLI 和
-桌面 client 仍需 D5 同步、验证和提交；实物验证仍未完成。
+firmware 的 **wire 和 lifecycle 行为**已升级为 8 槽、最大 512 bytes：D1 已落地 RAM
+多槽 store，D2 已落地 512-byte executor、参数化 `&runtime_macro_dynamic <slot>`
+behavior 和 Totem keymap 迁移，D3 已落地 capability v2 与逐槽 dynamic protocol，
+D4 已确认 boot/USB disconnect/BLE profile/endpoint 四条 lifecycle 路径都按全量清除
+处理所有槽位（多槽 positive/boundary host 测试已补强）。Python/CLI 和桌面 client
+仍需 D5 同步、验证和提交；实物验证仍未完成。

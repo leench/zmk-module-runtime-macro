@@ -1,9 +1,10 @@
 # RAM-only Dynamic Macro 多槽位扩展设计（D0）
 
-> **状态：D0、D1、D2、D3 已实现并完成 host/container 验证；D5 client 同步、
-> D4 上传级 lifecycle 和实物验证尚未完成。**
+> **状态：D0、D1、D2、D3、D4 已实现并完成 host/container 验证；D5 client 同步、
+> D6 集成与实物验证尚未完成。**
 >
-> 多槽 store、512-byte executor、参数化 behavior 和 v2 dynamic wire 已经落地。
+> 多槽 store、512-byte executor、参数化 behavior、v2 dynamic wire 和多槽 lifecycle
+> clear 已经落地。
 > [`DYNAMIC_PROTOCOL.md`](DYNAMIC_PROTOCOL.md) 现在描述实际 v2 contract：
 > `CAPABILITIES (0x23)` 返回 capability v2、配置槽数和最大 `512` bytes；dynamic
 > opcode 只接受有效 `0..N-1` slot，`0xff` 返回 `BAD_SLOT`。Python/CLI 和桌面 client
@@ -357,7 +358,7 @@ executor snapshot `+256 B`，合计 `+4464 B`；最新 dongle dynamic-on 构建�
 | Executor（`tests/host/runtime_macro_executor_test.c`） | 512-byte snapshot；static 与不同槽位动态全局 busy；consume-on-accept 与 keep 策略；busy/start error 保留；执行中 replacement 不影响 snapshot；完成/失败 zeroize |
 | Behavior（`tests/host/runtime_macro_dynamic_behavior_test.c`） | 参数化 slot 执行；越界 slot 安全拒绝且不消费；release 不二次执行；empty/expired 无副作用 |
 | Protocol（`tests/host/runtime_macro_protocol_test.c`） | capability v2 字段；`0xff` 与越界 slot → `BAD_SLOT`；每槽 BEGIN/DATA/CLEAR 语义；完整 512-byte（24 chunk）上传；1/22/23/256/511/512 边界；duplicate/out-of-order/timeout/丢 ACK 重传；CLEAR 幂等与逐槽清空全部；static `SET`/`PASSWORD_SET`/auth session 隔离；OPEN/PROTECTED/ERROR_LOCKED；无 readback 与响应不含文本 |
-| Lifecycle（`tests/host/runtime_macro_dynamic_lifecycle_test.c`） | policy on/off 清除全部槽位；不误清 static slots/credentials；USB disconnect 与 queued final DATA 的 generation race |
+| Lifecycle（`tests/host/runtime_macro_dynamic_lifecycle_test.c`） | 每槽独立 setup：policy on 清全部 slot + staging + TTL work；部分槽/已到期槽/空槽混合 boundary；boot reset；policy off 保留全部；NULL event 拒绝；Settings/static 调用为 0 |
 | Python（`tests/python/test_runtime_macro_cli.py`） | capability v1/v2 校验、malformed 拒绝；slot 参数与越界拒绝；chunking；默认/显式 TTL；restart 与 final ACK loss；`clear_all_dynamic()` 逐槽循环与部分失败；本地校验零 HID write；PROTECTED 未登录不触发 login |
 | 构建矩阵 | static-only、dynamic off/on、USB transport-off、Studio/CDC 共存、split central、split peripheral（角色专用 wrapper）、Totem dongle 完整 build + map 对比 |
 | 实物（用户暂缓） | 按 `DYNAMIC_MACRO_PLAN.md` 13.2 A–F 扩展为逐槽版本；本轮不执行 |
@@ -370,7 +371,7 @@ executor snapshot `+256 B`，合计 `+4464 B`；最新 dongle dynamic-on 构建�
 | D1 | Store 与 RAM 基线（已完成） | Kconfig `SLOT_COUNT`、多槽 store、TTL work、map 实测 | RAM 增量实测；Settings 零调用；store 测试通过 |
 | D2 | Executor 与 behavior（已完成） | 512-byte snapshot、参数化 behavior、keymap/wrapper 迁移说明 | 单 executor/全局 busy；现有静态测试无回归 |
 | D3 | Protocol 与 capability v2（已完成） | `0x23` v2、per-slot BEGIN/DATA/CLEAR、`0xff` → `BAD_SLOT`；改写 `DYNAMIC_PROTOCOL.md` | wire 表与 header 常量一致；512-byte/slot isolation/逐槽 clear 测试通过 |
-| D4 | Lifecycle 多槽 clear | `clear_all` 接入 USB/BLE/endpoint policy | policy on/off；不误清 static/auth |
+| D4 | Lifecycle 多槽 clear（已完成） | `clear_all` 接入 USB/BLE/endpoint policy | policy on/off；多槽 positive/boundary 测试；不误清 static/auth |
 | D5 | Python/CLI 与桌面规范 | 破坏式 API、`--slot`/`--all`、桌面规范同步 | Python 测试/Ruff；无 readback |
 | D6 | 集成与文档回归 | 完整回归、实物脚本、README/PLAN/桌面文档、最终 RAM/Flash 记录 | 自动化矩阵通过；实物验证按用户安排（当前暂缓） |
 
@@ -648,4 +649,91 @@ D3 不引入 readback、clear-all wire 或上传级 lifecycle。
 - `docs/DYNAMIC_PROTOCOL.md`
 - `docs/DYNAMIC_MULTISLOT_PLAN.md`
 
-D3 改动当前尚未提交；D2 两仓库提交仍按用户要求暂不推送。
+D3 已提交为本地提交 `cda9d49`；D2 两仓库提交（`4630c76`、`189bc17`）仍按用户
+要求暂不推送。
+
+---
+
+## 16. D4 实施记录
+
+### 16.1 验证结论（实现本已满足多槽语义）
+
+D4 审查了全部四个 lifecycle 入口，行为已经是“全量清除”：
+
+| 入口 | 位置 | 多槽行为 |
+| --- | --- | --- |
+| boot/reset | `src/runtime_macro_dynamic.c` 的 `SYS_INIT` → `zmk_runtime_macro_dynamic_reset()` | 清全部 slot、staging、TTL work |
+| confirmed USB disconnect | `src/runtime_macro_usb_hid.c` 的 `actual_management_usb_disconnect` 分支 | `clear_all`：全部 slot + staging + TTL |
+| BLE profile policy | `src/runtime_macro_dynamic_lifecycle.c` `runtime_macro_dynamic_profile_listener()` | `clear_all`，Kconfig 默认关 |
+| endpoint policy | `runtime_macro_dynamic_lifecycle.c` `runtime_macro_dynamic_endpoint_listener()` | `clear_all`，Kconfig 默认关 |
+
+`zmk_runtime_macro_dynamic_clear_all()` 本身只循环清 slot、取消共享 staging 并
+重排/取消单 TTL work；它不引用 auth、不引用 Settings/static slot API（本次审查用
+grep 确认 lifecycle 源文件对 `auth`、`settings_`、`slot_set`、`slot_clear` 均为零引用）。
+
+唯一代码改动是把 USB/BLE/endpoint 三个调用点从 legacy 别名
+`zmk_runtime_macro_dynamic_clear()` 改为显式的
+`zmk_runtime_macro_dynamic_clear_all()`，并补充说明注释；行为完全不变，只是把
+目标语义写清楚。legacy 别名仍保留并被 store 测试覆盖。
+
+### 16.2 测试补强（独立 setup，未复用同一 mock state）
+
+`tests/host/runtime_macro_dynamic_lifecycle_test.c`（policy on）：
+
+- 8 槽全部 committed + 共享 staging 进行中 → BLE profile listener 清全部 slot、
+  staging 和 TTL work；
+- 独立 boundary state：部分槽为空、slot 1 带 `1s` TTL 且已过期、slot 4 为
+  keep-after-execute、staging 指向空槽 → endpoint listener 清全部并在已空状态幂等；
+- boot reset 清全部 slot/staging/TTL work；
+- `NULL` event 返回 `-EINVAL` 且不改动任何 slot 或 staging；
+- Settings/static slot stub 计数器断言为 0。
+
+`tests/host/runtime_macro_dynamic_lifecycle_policy_off_test.c`（两 policy 均关）：
+
+- 独立 setup（slot 1/3/7 committed + 空槽 5 上的 staging）→ 两个 listener 都保留
+  全部 slot、TTL 与 staging，并保持 TTL work 已调度；
+- `NULL` event 拒绝且保留；
+- Settings/static 调用为 0。
+
+`tests/host/runtime_macro_usb_hid_test.c`：
+
+- 新增 `test_dynamic_disconnect_clears_every_slot()`：8 槽全 committed + staging；
+  非 disconnect 通知（suspend/resume/unknown）保留全部 committed slot（staging 被
+  USB 逻辑 protocol discard 取消，属既有安全边界）；confirmed
+  `USB_DC_DISCONNECTED` + `ZMK_USB_CONN_NONE` 清全部 slot、staging 和 TTL work，
+  且 static slot 文本与 settings 写入次数不变；
+- policy-off variant 改为逐槽验证全部 slot 在所有 USB 状态下都保留。
+
+policy on/off 由同一 fixture 编译两次（`runtime_macro_usb_hid_test`、
+`runtime_macro_usb_hid_policy_off_test`）分别覆盖。
+
+### 16.3 测试与构建结果
+
+- `CLANG=gcc ./tests/host/run.sh`：四轮（gcc、gcc sanitizer、替代编译器、替代
+  编译器 sanitizer）全部 PASS；
+- zmk-dev 全新 build：`just totem-left` `197892 B` Flash / `41856 B` RAM，
+  `just totem-right` `197892 B` / `42084 B`，`just totem-dongle`
+  `432468 B` / `198654 B`——与 D3 完全一致（D4 无行为改动）；
+- dongle `.config`：`CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC=y`、slot count `8`、
+  `CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_USB_DISCONNECT=y`、BLE/endpoint policy
+  默认关；map：`.bss.runtime_macro_dynamic_state` `0x12a0`（4768 B）、
+  `.bss.runtime_macro_executor` `0x214`（532 B）、单一 `.data.runtime_macro_dynamic_ttl_work`；
+- peripheral（left/right）：`compile_commands.json` 不含 dynamic store 或 dynamic
+  behavior，dynamic 引用为 0，fail-closed guard 未放宽。
+
+### 16.4 D4 范围边界
+
+- 未修改 wire、protocol opcode、Python/CLI、桌面应用、DTS/binding、配置仓库；
+- upload 级 lifecycle 策略仍为 backlog，未随多槽位引入；
+- lifecycle clear 仍与认证 transport reset 是两条独立路径，互不替代。
+
+### 16.5 D4 变更文件
+
+- `src/runtime_macro_dynamic_lifecycle.c`（显式 `clear_all` + 注释）
+- `src/runtime_macro_usb_hid.c`（显式 `clear_all` + 注释）
+- `tests/host/runtime_macro_dynamic_lifecycle_test.c`（多槽 positive/boundary）
+- `tests/host/runtime_macro_dynamic_lifecycle_policy_off_test.c`（多槽保留）
+- `tests/host/runtime_macro_usb_hid_test.c`（多槽 disconnect + policy-off）
+- `docs/DYNAMIC_MULTISLOT_PLAN.md`、`docs/DYNAMIC_MACRO_PLAN.md`
+
+D4 改动尚未提交；D2/D3 提交仍按用户要求暂不推送。
