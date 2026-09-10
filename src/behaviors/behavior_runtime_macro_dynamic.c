@@ -20,13 +20,27 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 static int on_keymap_binding_pressed(struct zmk_behavior_binding *binding,
                                      struct zmk_behavior_binding_event event) {
-    ARG_UNUSED(binding);
+    const uint32_t slot = binding->param1;
+
+    /* The log statements can compile out, so keep the parameter marked used. */
     ARG_UNUSED(event);
 
-    int err = zmk_runtime_macro_dynamic_execute();
+    /*
+     * The binding cell is a full 32-bit devicetree value: range-check it before
+     * narrowing, otherwise an out-of-range cell could wrap onto a valid slot
+     * and execute the wrong macro. An out-of-range slot is rejected without
+     * executing, consuming, or modifying any slot.
+     */
+    if (slot >= (uint32_t)ZMK_RUNTIME_MACRO_DYNAMIC_SLOT_COUNT) {
+        LOG_ERR("Dynamic runtime macro slot %u is out of range (position %d)", slot,
+                event.position);
+        return -EINVAL;
+    }
+
+    int err = zmk_runtime_macro_dynamic_execute_slot((uint8_t)slot);
     if (err != 0) {
-        LOG_ERR("Failed to start dynamic runtime macro (position %d, err %d)", event.position,
-                err);
+        LOG_ERR("Failed to start dynamic runtime macro slot %u (position %d, err %d)", slot,
+                event.position, err);
         return err;
     }
 

@@ -378,16 +378,9 @@ int zmk_runtime_macro_dynamic_execute_slot(uint8_t slot) {
     }
 
     /*
-     * D1 refuses text the current executor snapshot cannot hold instead of
-     * silently truncating it (see
-     * ZMK_RUNTIME_MACRO_DYNAMIC_EXECUTABLE_MAX_TEXT_LEN).
+     * The shared executor snapshot holds the full per-slot maximum since D2,
+     * so a committed slot is always executable without truncation.
      */
-    if (entry->committed_length >
-        ZMK_RUNTIME_MACRO_DYNAMIC_EXECUTABLE_MAX_TEXT_LEN) {
-        err = -EINVAL;
-        goto out;
-    }
-
     err = zmk_runtime_macro_executor_start(entry->committed,
                                            entry->committed_length);
     if (err == 0 && entry->committed_consume_on_accept) {

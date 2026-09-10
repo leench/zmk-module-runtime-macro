@@ -5,4 +5,4 @@ description: Runtime Macro Dynamic Behavior
 
 compatible: "zmk,behavior-runtime-macro-dynamic"
 
-include: zero_param.yaml
+include: one_param.yaml

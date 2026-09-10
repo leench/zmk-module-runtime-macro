@@ -448,11 +448,11 @@ static void test_legacy_slot_zero_entry_points(void) {
     assert_slot_text(3U, other, sizeof(other) - 1U);
 }
 
-static void test_execution_policy_and_oversize(void) {
+static void test_execution_policy_and_full_slot(void) {
     const uint8_t text[] = "repeatable";
-    uint8_t oversized[ZMK_RUNTIME_MACRO_DYNAMIC_MAX_TEXT_LEN + 4U];
+    uint8_t full_slot[SLOT_MAX];
 
-    memset(oversized, 'O', sizeof(oversized));
+    memset(full_slot, 'F', sizeof(full_slot));
 
     reset_store();
     executor_start_result = 0;
@@ -482,21 +482,26 @@ static void test_execution_policy_and_oversize(void) {
     assert(executor_start_calls == 2U);
 
     /*
-     * Text longer than the current executor capacity is refused instead of
-     * being truncated, and stays available in the slot.
+     * The shared executor holds the full per-slot maximum since D2, so a
+     * 512-byte slot is handed over without truncation and consumed by default.
      */
     reset_store();
-    commit_slot(4U, oversized, sizeof(oversized), 300U);
-    assert(zmk_runtime_macro_dynamic_execute_slot(4U) == -EINVAL);
-    assert(executor_start_calls == 0U);
-    assert_slot_text(4U, oversized, sizeof(oversized));
-    assert(zmk_runtime_macro_dynamic_execute() == 0);
+    commit_slot(5U, full_slot, sizeof(full_slot), 300U);
+    assert(zmk_runtime_macro_dynamic_execute_slot(5U) == 0);
+    assert(executor_start_calls == 1U);
+    assert(executor_start_lengths[0] == sizeof(full_slot));
+    assert_slot_empty(5U);
 
+    /*
+     * The legacy single-object entry point executes slot 0 with the same
+     * executor capacity.
+     */
     reset_store();
-    commit_slot(0U, oversized, sizeof(oversized), 300U);
-    assert(zmk_runtime_macro_dynamic_execute() == -EINVAL);
-    assert(executor_start_calls == 0U);
-    assert_slot_text(0U, oversized, sizeof(oversized));
+    commit_slot(0U, full_slot, sizeof(full_slot), 300U);
+    assert(zmk_runtime_macro_dynamic_execute() == 0);
+    assert(executor_start_calls == 1U);
+    assert(executor_start_lengths[0] == sizeof(full_slot));
+    assert_slot_empty(0U);
 }
 
 static void test_clear_slot_and_clear_all(void) {
@@ -786,7 +791,7 @@ int main(void) {
     test_allowed_and_rejected_bytes();
     test_shared_staging_and_atomic_commit();
     test_legacy_slot_zero_entry_points();
-    test_execution_policy_and_oversize();
+    test_execution_policy_and_full_slot();
     test_clear_slot_and_clear_all();
     test_per_slot_ttl_and_earliest_deadline();
     test_ttl_stale_generation();

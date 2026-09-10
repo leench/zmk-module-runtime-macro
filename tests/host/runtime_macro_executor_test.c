@@ -545,6 +545,37 @@ static void test_dynamic_snapshot_and_consume(void) {
                          sizeof(runtime_macro_executor.text)));
 }
 
+static void test_dynamic_full_slot_snapshot(void) {
+    uint8_t text[ZMK_RUNTIME_MACRO_DYNAMIC_SLOT_MAX_TEXT_LEN];
+
+    memset(text, 'f', sizeof(text));
+    reset_test_state();
+
+    /* Fill a full 512-byte slot through the shared staging buffer. */
+    EXPECT_EQ(0, zmk_runtime_macro_dynamic_begin_slot(3U, sizeof(text), 300U, true));
+    for (size_t offset = 0U; offset < sizeof(text);) {
+        const size_t remaining = sizeof(text) - offset;
+        const size_t chunk = remaining > 22U ? 22U : remaining;
+
+        EXPECT_EQ(0, zmk_runtime_macro_dynamic_append_slot(3U, offset, text + offset, chunk));
+        offset += chunk;
+    }
+
+    /* The executor snapshot holds the full per-slot maximum since D2. */
+    EXPECT_EQ(0, zmk_runtime_macro_dynamic_execute_slot(3U));
+    EXPECT_TRUE(!runtime_macro_dynamic_state.slots[3U].committed_valid);
+    EXPECT_EQ(0, runtime_macro_dynamic_state.slots[3U].ttl_deadline_ms);
+    EXPECT_TRUE(zmk_runtime_macro_is_busy());
+    EXPECT_EQ(sizeof(text), runtime_macro_executor.length);
+    EXPECT_EQ(0, memcmp(text, runtime_macro_executor.text, sizeof(text)));
+    EXPECT_EQ('\0', runtime_macro_executor.text[sizeof(text)]);
+
+    run_executor_to_completion(sizeof(text));
+    EXPECT_TRUE(!zmk_runtime_macro_is_busy());
+    EXPECT_TRUE(all_zero((const uint8_t *)runtime_macro_executor.text,
+                         sizeof(runtime_macro_executor.text)));
+}
+
 static void test_dynamic_empty_expired_and_busy(void) {
     const uint8_t dynamic_text[] = "dynamic";
 
@@ -620,6 +651,7 @@ int main(void) {
     test_empty_slot_and_busy_recovery();
     test_event_errors_and_schedule_failure();
     test_dynamic_snapshot_and_consume();
+    test_dynamic_full_slot_snapshot();
     test_dynamic_empty_expired_and_busy();
     test_dynamic_replacement_and_start_failure();
     test_dynamic_event_error_and_snapshot_reset();

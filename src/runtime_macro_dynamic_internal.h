@@ -12,27 +12,20 @@
 
 #include <zephyr/kernel.h>
 
-/* Per-slot committed and staging capacity of the multi-slot RAM store. */
+/*
+ * Per-slot committed, staging, and executor capacity of the multi-slot store.
+ * The shared executor snapshot can hold the full per-slot maximum since D2.
+ */
 #define ZMK_RUNTIME_MACRO_DYNAMIC_SLOT_MAX_TEXT_LEN 512U
 
 /*
- * Legacy single-object bound. During D1 the shared executor snapshot and the
- * frozen v1 dynamic wire contract still hold 256 bytes, so the legacy
- * single-object entry points stay limited to this value, and execution
- * refuses (never truncates) anything longer. D2 raises the executor to the
- * slot capacity and removes this constant.
- *
- * See ZMK_RUNTIME_MACRO_DYNAMIC_EXECUTABLE_MAX_TEXT_LEN below.
+ * Legacy single-object bound of the frozen v1 dynamic wire contract. The v1
+ * protocol opcodes, DYNAMIC_PROTOCOL.md, and the legacy single-object entry
+ * points all still address one 256-byte object on the legacy slot until D3
+ * migrates the wire to per-slot addressing. The multi-slot store and the
+ * parameterized behavior use ZMK_RUNTIME_MACRO_DYNAMIC_SLOT_MAX_TEXT_LEN.
  */
 #define ZMK_RUNTIME_MACRO_DYNAMIC_MAX_TEXT_LEN 256U
-
-/*
- * Bytes the shared executor can currently execute. The store can already hold
- * ZMK_RUNTIME_MACRO_DYNAMIC_SLOT_MAX_TEXT_LEN bytes per slot, but a longer
- * text is rejected with an error until the executor snapshot grows in D2.
- */
-#define ZMK_RUNTIME_MACRO_DYNAMIC_EXECUTABLE_MAX_TEXT_LEN \
-    ZMK_RUNTIME_MACRO_DYNAMIC_MAX_TEXT_LEN
 
 /* Host test builds include this header without generated Kconfig values. */
 #if !defined(CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_SLOT_COUNT)
@@ -44,8 +37,9 @@
 
 /*
  * Slot used by the legacy single-object entry points. The frozen v1 wire
- * contract, the zero-parameter behavior, and the lifecycle clear paths all
- * address this slot until D2/D3 migrate them to explicit slots.
+ * contract, the legacy single-object entry points, and the lifecycle clear
+ * paths address this slot until D3 migrates the wire to per-slot addressing.
+ * The parameterized behavior addresses explicit slots since D2.
  */
 #define ZMK_RUNTIME_MACRO_DYNAMIC_LEGACY_SLOT 0U
 
@@ -169,18 +163,18 @@ void zmk_runtime_macro_dynamic_check_expiry(void);
  * Try to hand one slot's committed text to the shared executor. Empty or
  * expired text is harmless and returns 0. By default that slot is consumed
  * when the executor accepts its private snapshot; an upload may opt out of
- * consumption. Busy or start failures always keep it available. Text longer
- * than the current executor capacity is refused with -EINVAL instead of being
- * truncated (D2 prerequisite).
+ * consumption. Busy or start failures always keep it available, and an
+ * out-of-range slot is refused with -EINVAL without touching any slot. The
+ * shared executor can hold the full per-slot maximum.
  */
 int zmk_runtime_macro_dynamic_execute_slot(uint8_t slot);
 
 /*
  * Legacy single-object entry points. They act on
  * ZMK_RUNTIME_MACRO_DYNAMIC_LEGACY_SLOT and keep the frozen 256-byte bound of
- * the v1 wire contract and the current executor snapshot. They remain the only
- * entry points used by the protocol, behavior, USB, and lifecycle code until
- * D2/D3 migrate those callers to explicit slots.
+ * the v1 wire contract. They remain the entry points used by the protocol and
+ * USB/lifecycle code until D3 migrates the wire to explicit slots; the keymap
+ * behavior addresses explicit slots since D2.
  */
 int zmk_runtime_macro_dynamic_begin(size_t total_length, uint32_t ttl_seconds);
 int zmk_runtime_macro_dynamic_begin_with_options(size_t total_length,

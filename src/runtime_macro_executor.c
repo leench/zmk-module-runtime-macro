@@ -22,7 +22,7 @@
 #if defined(CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC) && CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC
 #include "runtime_macro_dynamic_internal.h"
 #define RUNTIME_MACRO_EXECUTOR_MAX_TEXT_LEN \
-    ZMK_RUNTIME_MACRO_DYNAMIC_MAX_TEXT_LEN
+    ZMK_RUNTIME_MACRO_DYNAMIC_SLOT_MAX_TEXT_LEN
 #else
 #define RUNTIME_MACRO_EXECUTOR_MAX_TEXT_LEN CONFIG_ZMK_RUNTIME_MACRO_MAX_TEXT_LEN
 #endif
@@ -47,8 +47,8 @@ _Static_assert(RUNTIME_MACRO_EXECUTOR_MAX_TEXT_LEN >=
                "executor capacity must hold every static macro");
 #if defined(CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC) && CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC
 _Static_assert(RUNTIME_MACRO_EXECUTOR_MAX_TEXT_LEN >=
-                   ZMK_RUNTIME_MACRO_DYNAMIC_MAX_TEXT_LEN,
-               "executor capacity must hold every dynamic macro");
+                   ZMK_RUNTIME_MACRO_DYNAMIC_SLOT_MAX_TEXT_LEN,
+               "executor capacity must hold every dynamic macro slot");
 #endif
 
 static struct runtime_macro_executor_state runtime_macro_executor;

@@ -31,7 +31,7 @@
 #endif
         runtime_macro_dynamic: runtime_macro_dynamic {
             compatible = "zmk,behavior-runtime-macro-dynamic";
-            #binding-cells = <0>;
+            #binding-cells = <1>;
             display-name = "Runtime Macro Dynamic";
         };
     };
