@@ -9,8 +9,9 @@ Runtime Macro v2 32-byte management frame 上的 capability、上传和逐槽 cl
 动态协议没有动态文本 readback，也没有 protocol execute。dynamic management HID
 通道未加密、未认证，不得用于秘密数据。
 
-> 本文描述 D3 已实现的 firmware wire contract。Python/CLI 和桌面 client 的
-> v2 同步属于后续 D5；在 client 同步前，不得把旧的单槽 client 当作 v2 client。
+> 本文描述当前已实现的 firmware wire contract。Python CLI 已在 D5 按本 v2
+> contract 同步并通过测试；桌面 client 由用户单独处理，尚未在本仓库实现或验证。
+> 旧的单槽 client 不兼容当前 v2，客户端不得降级为 v1。
 
 ## 1. 冻结值和安全边界
 

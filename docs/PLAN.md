@@ -10,28 +10,26 @@ private test data, or credentials.
 
 - Static phases 1–5 are implemented and committed, including the
   v2-authenticated reference Python client.
-- The RAM-only dynamic macro is implemented and committed through dynamic
-  phases 1–7: feature gate, RAM store and TTL, shared executor with consume
-  semantics, the `&runtime_macro_dynamic` keymap behavior, the dynamic protocol
-  and capability query, lifecycle clear policies, and the reference Python
-  client/CLI with upload and clear (no readback).
+- The RAM-only dynamic macro is implemented through the multislot D0–D5 stages:
+  up to 8 independent RAM slots, 512-byte store/executor capacity, parameterized
+  behavior, dynamic protocol v2, lifecycle clear policies, and the reference
+  Python client/CLI with `--slot`/`--all` and no readback. The current multislot
+  record is [`DYNAMIC_MULTISLOT_PLAN.md`](DYNAMIC_MULTISLOT_PLAN.md).
 - Dynamic phase 8 (integration, hardware validation, and final documentation) is
-  only partly complete. Automation passes: host C suite (52 test binaries),
-  Python tests/`py_compile`/Ruff, the required devcontainer build matrix, and
-  the target Totem dongle build (Flash `432196 / 811008 B`, RAM
-  `194190 / 262144 B`). Recorded in
-  [`DYNAMIC_MACRO_PLAN.md`](DYNAMIC_MACRO_PLAN.md) section 13.5.
-- Still unverified: every physical hardware workflow (upload/execute/consume,
-  busy, TTL, management USB disconnect, USB-A management to Bluetooth-B output,
-  and `KEEP_AFTER_EXECUTE`), desktop application integration, and the final
-  release/readiness review. The dynamic phase 8 completion list must not be
-  treated as satisfied.
-- Phase 6 hardware validation is in progress; physical password authentication
-  has not yet been verified. One compatible central device has completed a real
-  HID protocol round trip and slot read/write check.
-- Physical key output, reboot/NVS retention, portability across other boards
-  and host backends, and complete hardware lifecycle validation still need
-  verification.
+  only partly complete. Host C, Python/`py_compile`/Ruff, and the current dongle
+  build have passed. The current Totem dongle build is Flash `432468 B`, RAM
+  `198654 / 262144 B` (remaining `63490 B`).
+- The dongle has completed real v2 capability and CLI management checks: 8 slots,
+  512-byte boundary upload, per-slot clear, clear-all iteration, and local slot
+  validation. Physical key execution/consume, busy, TTL, lifecycle, USB-A to
+  Bluetooth-B output, full static/auth regression, desktop integration, and the
+  final release/readiness review remain unverified.
+- The configuration repository currently uses the requested single
+  `leen_totem.keymap`; this D6 record only claims the dongle build, not split
+  peripheral builds.
+- Physical password authentication, physical key output, reboot/NVS retention,
+  portability across other boards and host backends, and complete hardware
+  lifecycle validation still need verification.
 
 ## Current architecture
 
@@ -46,10 +44,12 @@ static macro slot
     -> normal keyboard HID output
 ```
 
-The RAM-only dynamic macro adds one temporary text object that lives only in
-volatile RAM, uses the same executor, and is written through the dynamic
-commands on the same management transport. Its state and commands are separate
-from the static slot store; see [`DYNAMIC_PROTOCOL.md`](DYNAMIC_PROTOCOL.md).
+The current RAM-only dynamic macro implementation provides up to eight independent
+512-byte temporary text slots in volatile RAM, uses one shared executor and one
+shared upload staging buffer, and is written through the dynamic commands on the
+same management transport. Its state and commands are separate from the static
+slot store; see [`DYNAMIC_MULTISLOT_PLAN.md`](DYNAMIC_MULTISLOT_PLAN.md) and
+[`DYNAMIC_PROTOCOL.md`](DYNAMIC_PROTOCOL.md).
 
 The optional management transport is a dedicated vendor USB HID interface,
 defaulting to `HID_1`. ZMK's normal keyboard HID remains `HID_0`.
@@ -137,7 +137,11 @@ dynamic macro execution share this executor; a second macro is rejected with
 - Complete the dynamic phase 8 physical workflows and desktop integration in
   [`DYNAMIC_MACRO_PLAN.md`](DYNAMIC_MACRO_PLAN.md) sections 13.2 and 13.5.
 
-# RAM-only dynamic macro (implemented)
+# RAM-only dynamic macro (current multislot delivery)
+
+The original single-slot/256-byte sections below are historical v1 planning records.
+The current implementation and stage status are maintained in
+[`DYNAMIC_MULTISLOT_PLAN.md`](DYNAMIC_MULTISLOT_PLAN.md).
 
 ## Goal
 
@@ -170,7 +174,7 @@ All output continues to be generated as normal ZMK keycode events. The feature
 does not construct raw keyboard HID reports and does not create a second output
 worker.
 
-## Product decisions for the first implementation
+## Historical v1 product decisions
 
 | Item | First implementation decision |
 |---|---|
@@ -359,34 +363,17 @@ No sophisticated token-bucket rate limiter is required initially. Bounded frame
 size, bounded text length, one staging transaction, the existing HID queue, and
 single-executor `-EBUSY` behavior are sufficient for the current use cases.
 
-## Multiple dynamic macros: future extension
+## Historical v1 extension note
 
-The current implementation supports exactly one dynamic macro. If future use
-cases require multiple independent temporary texts at the same time, the design
-can be extended without changing the basic executor model:
+This section is a historical v1 extension record. The agreed follow-up scope has
+now been implemented through D0–D5: up to 8 independent slots of 512 bytes each,
+with a shared staging buffer and one executor. Each slot has its own committed
+buffer, length, validity state, TTL, and consumption/keep policy; lifecycle events
+clear all slots, while execution clears only the selected slot. See
+[`DYNAMIC_MULTISLOT_PLAN.md`](DYNAMIC_MULTISLOT_PLAN.md).
 
-```dts
-&runtime_macro_dynamic 0
-&runtime_macro_dynamic 1
-```
-
-A future extension may add a separate configuration such as:
-
-```text
-CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_SLOT_COUNT
-```
-
-The agreed follow-up scope is up to 8 independent slots of 512 bytes each with a
-shared staging buffer (see
-[`DYNAMIC_MACRO_PLAN.md`](DYNAMIC_MACRO_PLAN.md) section 18.2). The extension
-must still keep only one upload staging transaction and one executor. Each slot
-would have its own committed buffer, length, validity state, TTL, and per-upload
-lifecycle policy; lifecycle events would clear all slots, while execution would
-clear only the selected slot.
-
-Supporting multiple simultaneous uploads, an execution queue, concurrent output,
-or dynamic `LIST/GET` would be a separate larger feature and is not part of this
-plan.
+The following remain out of scope: multiple simultaneous uploads, an execution
+queue, concurrent output, dynamic `LIST/GET`, and dynamic readback.
 
 ## Security boundary
 

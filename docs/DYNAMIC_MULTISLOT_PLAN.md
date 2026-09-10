@@ -1,12 +1,13 @@
 # RAM-only Dynamic Macro 多槽位扩展设计（D0）
 
-> **状态：D0、D1、D2、D3、D4 已实现并完成 host/container 验证；D5 的 Python CLI 子
-> 范围已实现（见第 17 节）；桌面端由用户单独处理，不在本仓库实现；D6 集成与实物验证
-> 尚未完成。**
+> **状态：D0–D5 已实现并完成相应 host/container 验证；D5 的 Python CLI 子范围
+> 已实现（见第 17 节）。桌面端由用户单独处理，不在本仓库实现。D6 集成回归和最终
+> readiness review 尚未完成。**
 >
-> 多槽 store、512-byte executor、参数化 behavior、v2 dynamic wire 和多槽 lifecycle
-> clear 已经落地。
-> [`DYNAMIC_PROTOCOL.md`](DYNAMIC_PROTOCOL.md) 现在描述实际 v2 contract：
+> 多槽 store、512-byte executor、参数化 behavior、v2 dynamic wire、多槽 lifecycle
+> clear 和 Python CLI 已落地。dongle 已完成 v2 capability、slot 上传/清除和边界 CLI
+> 实机验证；物理按键执行、TTL/lifecycle 全流程、桌面端和完整 D6 矩阵仍未完成。
+> [`DYNAMIC_PROTOCOL.md`](DYNAMIC_PROTOCOL.md) 描述实际 v2 contract：
 > `CAPABILITIES (0x23)` 返回 capability v2、配置槽数和最大 `512` bytes；dynamic
 > opcode 只接受有效 `0..N-1` slot，`0xff` 返回 `BAD_SLOT`。Python CLI 已按该 v2
 > contract 实现；桌面 client 未在本仓库同步，不能把当前桌面版本当作 v2 client。
@@ -16,10 +17,10 @@
 ## 1. 文档关系
 
 - [`PLAN.md`](PLAN.md)：产品范围、架构和安全边界的总览；
-- [`DYNAMIC_MACRO_PLAN.md`](DYNAMIC_MACRO_PLAN.md)：单槽位交付的实施与阶段记录，
-  多槽位 backlog 在其 18.1、18.2；
+- [`DYNAMIC_MACRO_PLAN.md`](DYNAMIC_MACRO_PLAN.md)：初版单槽位历史记录和 Phase 8
+  收尾记录；当前多槽位阶段状态以本文为准；
 - [`DYNAMIC_PROTOCOL.md`](DYNAMIC_PROTOCOL.md)：**当前已交付固件**的 dynamic v2
-  wire contract；D5 client 必须据此同步；
+  wire contract；Python CLI 已据此同步，桌面端仍由用户处理；
 - [`DYNAMIC_DESKTOP_APP_SPEC.md`](DYNAMIC_DESKTOP_APP_SPEC.md)：桌面应用实施规范；
   桌面端由用户单独处理，本仓库不实现，也不在本轮修改该规范；
 - 本文：多槽位扩展的目标设计、阶段划分和验收矩阵。
@@ -199,12 +200,13 @@ version 或不符合上述约束的 metadata，不得降级到 v1 语义或 stat
 
 - compatible 保持 `zmk,behavior-runtime-macro-dynamic`，locality 保持 central；
 - binding 从 zero-parameter 改为 **1 cell**：`&runtime_macro_dynamic <slot>`（D2 已完成）；
-- 旧零参数引用必须迁移（例如 `leen_totem_dongle.keymap` 的
-  `&runtime_macro_dynamic` 变为 `&runtime_macro_dynamic 0`，D2 已完成）；本模块不保留
-  兼容 alias，也不接受 `#binding-cells = <0>` 的旧写法；
-- split peripheral 的角色专用 keymap 包装继续有效：`RM_DYN` 展开为
-  `&runtime_macro_dynamic <slot>` 或 `&none`，两者都是单个 binding；fail-closed
-  guard（`runtime_macro_dynamic_guard.c`）和 `/omit-if-no-ref/` 规则不变；
+- 旧零参数引用必须迁移为 `&runtime_macro_dynamic 0`，本模块不保留兼容 alias，也不接受
+  `#binding-cells = <0>` 的旧写法；当前 `zmk-config-leen` 已按用户要求恢复为单文件
+  `boards/shields/leen_totem/leen_totem.keymap`，内容包含 slot `0` 和 Macro layer
+  的 dynamic slot `1..5`；
+- fail-closed guard（`runtime_macro_dynamic_guard.c`）和 `/omit-if-no-ref/` 规则不变。
+  角色专用 wrapper 仅属于此前的 split peripheral 验证方案；当前单文件配置只声明并
+  验证 dongle 构建，不把 left/right 构建写成当前已通过；
 - 运行期 slot 越界（`slot >= CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_SLOT_COUNT`）由驱动
   安全拒绝：不执行、不消费、不修改状态，返回错误；
 - press 调用该槽的执行入口，成功（含 empty/expired 的无副作用结果）返回
@@ -363,8 +365,8 @@ executor snapshot `+256 B`，合计 `+4464 B`；最新 dongle dynamic-on 构建�
 | Protocol（`tests/host/runtime_macro_protocol_test.c`） | capability v2 字段；`0xff` 与越界 slot → `BAD_SLOT`；每槽 BEGIN/DATA/CLEAR 语义；完整 512-byte（24 chunk）上传；1/22/23/256/511/512 边界；duplicate/out-of-order/timeout/丢 ACK 重传；CLEAR 幂等与逐槽清空全部；static `SET`/`PASSWORD_SET`/auth session 隔离；OPEN/PROTECTED/ERROR_LOCKED；无 readback 与响应不含文本 |
 | Lifecycle（`tests/host/runtime_macro_dynamic_lifecycle_test.c`） | 每槽独立 setup：policy on 清全部 slot + staging + TTL work；部分槽/已到期槽/空槽混合 boundary；boot reset；policy off 保留全部；NULL event 拒绝；Settings/static 调用为 0 |
 | Python（`tests/python/test_runtime_macro_cli.py`） | capability v1/v2 校验、malformed 拒绝；slot 参数与越界拒绝；chunking；默认/显式 TTL；restart 与 final ACK loss；`clear_all_dynamic()` 逐槽循环与部分失败；本地校验零 HID write；PROTECTED 未登录不触发 login |
-| 构建矩阵 | static-only、dynamic off/on、USB transport-off、Studio/CDC 共存、split central、split peripheral（角色专用 wrapper）、Totem dongle 完整 build + map 对比 |
-| 实物（用户暂缓） | 按 `DYNAMIC_MACRO_PLAN.md` 13.2 A–F 扩展为逐槽版本；本轮不执行 |
+| 构建矩阵 | static-only、dynamic off/on、USB transport-off、Studio/CDC 共存、split central、Totem dongle 完整 build + map 对比；split peripheral 仅在显式采用角色 wrapper 时验证，当前单文件配置不宣称已通过 |
+| 实物 | 已完成 dongle v2 capability、slot 上传/清除和 CLI 边界验证；物理按键执行、TTL、busy、USB/BLE lifecycle 和 static/auth 全流程仍待安排 |
 
 ## 11. 阶段划分（D0–D6）
 
@@ -375,8 +377,8 @@ executor snapshot `+256 B`，合计 `+4464 B`；最新 dongle dynamic-on 构建�
 | D2 | Executor 与 behavior（已完成） | 512-byte snapshot、参数化 behavior、keymap/wrapper 迁移说明 | 单 executor/全局 busy；现有静态测试无回归 |
 | D3 | Protocol 与 capability v2（已完成） | `0x23` v2、per-slot BEGIN/DATA/CLEAR、`0xff` → `BAD_SLOT`；改写 `DYNAMIC_PROTOCOL.md` | wire 表与 header 常量一致；512-byte/slot isolation/逐槽 clear 测试通过 |
 | D4 | Lifecycle 多槽 clear（已完成） | `clear_all` 接入 USB/BLE/endpoint policy | policy on/off；多槽 positive/boundary 测试；不误清 static/auth |
-| D5 | Python/CLI 与桌面规范 | CLI：破坏式 API、`--slot`/`--all`（已完成）；桌面端：用户单独处理 | CLI：Python 测试/Ruff；无 readback（已通过） |
-| D6 | 集成与文档回归 | 完整回归、实物脚本、README/PLAN/桌面文档、最终 RAM/Flash 记录 | 自动化矩阵通过；实物验证按用户安排（当前暂缓） |
+| D5 | Python/CLI 与桌面边界 | CLI：破坏式 API、`--slot`/`--all`（已完成）；桌面端：用户单独处理 | Python 70 tests、py_compile、Ruff、CLI 实机基本流程通过 |
+| D6 | 集成与文档回归（进行中） | 完整回归、当前配置文档、最终 RAM/Flash 和 readiness review | host/Python/dongle 已有结果；完整矩阵、物理按键流程和桌面端仍未完成 |
 
 每个阶段继续遵守项目流程：用户确认开始 → 只实现该阶段范围 → 测试与审查 →
 `zmk-dev` devcontainer 构建并记录 RAM/Flash → 独立 commit、push → 用户确认后进入
@@ -388,11 +390,12 @@ executor snapshot `+256 B`，合计 `+4464 B`；最新 dongle dynamic-on 构建�
   workqueue 小栈路径上；
 - **wire 破坏性**：`DYNAMIC_PROTOCOL.md` 已完成 v2 改写，Python CLI 已按 v2 实现；
   桌面应用的对接与测试由用户单独处理，在其完成前不得声称桌面端已支持多槽位；
-- **keymap 迁移**：`leen_totem_dongle.keymap` 的零参数引用和配置仓库需要同步；本阶段
-  不修改配置仓库；
+- **keymap 结构**：配置仓库当前按用户要求使用单文件 `leen_totem.keymap`；本仓库不
+  擅自恢复角色拆分。当前只记录 dongle 构建和 dongle 实机 CLI 结果；
 - **桌面状态表达**：无 readback 决定了 UI 只能显示本地观察状态，需要产品确认文案；
-  该工作属用户侧的桌面实现范围，本仓库只提供 wire 契约；
-- **实物验证**：用户已暂缓，D6 完成标准和 Phase 8 的实物项在验证前不得标记完成；
+  该工作属用户侧桌面实现范围，本仓库只提供 wire 契约；
+- **实物验证**：已完成 CLI 管理面基本验证，但物理按键执行和 A–F 全流程仍未完成，
+  D6 完成标准在验证前不得标记完成；
 - **上传级 lifecycle**：仍为 backlog，多槽位实现不得顺带引入。
 
 ---
@@ -536,15 +539,15 @@ lifecycle，以及实物验证；readback 和 clear-all wire 仍明确不提供�
   `ZMK_RUNTIME_MACRO_DYNAMIC_MAX_TEXT_LEN`（`256`）仅作为内部兼容测试入口保留；
   D3 protocol 已改用 slot-aware API，不保留旧零参数 behavior alias。
 
-### 14.3 配置仓库 keymap 迁移
+### 14.3 配置仓库 keymap 迁移（D2 历史记录）
 
-`zmk-config-leen`（D2 keymap 迁移已提交到本地提交 `189bc17`，暂未推送）：
+D2 当时先使用角色专用 keymap；随后配置仓库按用户要求恢复为单文件结构。当前状态
+记录在第 17.6 节：
 
-- `boards/shields/leen_totem/leen_totem_dongle.keymap` 的共享正文 `RM_DYN` 由
-  `&runtime_macro_dynamic` 改为 `&runtime_macro_dynamic 0`；
-- `leen_totem_left.keymap` / `leen_totem_right.keymap` wrapper 继续定义
-  `RM_NO_DYNAMIC`，peripheral 仍编译 `&none`；
-- dongle 生成的 devicetree 中该键位为 `&runtime_macro_dynamic 0x0`。
+- 当前文件为 `boards/shields/leen_totem/leen_totem.keymap`；
+- base dynamic binding 为 `&runtime_macro_dynamic 0`，Macro layer 左手第 3 排为
+  dynamic slot `1..5`；
+- dongle 生成的 devicetree 中 dynamic binding 为 `&runtime_macro_dynamic 0x0`。
 
 ### 14.4 测试记录
 
@@ -561,8 +564,8 @@ lifecycle，以及实物验证；readback 和 clear-all wire 仍明确不提供�
   槽位与 legacy slot 0 都能完整交给 executor 并在默认策略下消费；
 - 既有 static、protocol（v1）、USB HID、auth、lifecycle host 测试保持通过。
 
-Python（未修改 client）：`python3 -m unittest discover -s tests/python` 62 tests
-通过，`py_compile` 通过，`ruff check tools tests/python` 通过。
+Python（D2 当时尚未修改 client）：`python3 -m unittest discover -s tests/python` 62 tests
+通过，`py_compile` 通过，`ruff check tools tests/python` 通过；D5 后的当前 CLI 结果见第 17.4 节。
 
 ### 14.5 构建与 RAM/Flash 实测
 
@@ -608,7 +611,8 @@ D2 相对 D1：Flash `+16 B`，RAM `+256 B`（executor snapshot `256 → 512`，
 `tests/host/runtime_macro_executor_test.c`、
 `tests/host/runtime_macro_dynamic_store_test.c`、本文档。
 
-配置仓库（未提交）：`boards/shields/leen_totem/leen_totem_dongle.keymap`。
+配置仓库（D2 历史记录）：当时使用 `boards/shields/leen_totem/leen_totem_dongle.keymap`；当前已恢复为
+`boards/shields/leen_totem/leen_totem.keymap`，并已提交到配置仓库。
 
 ### 14.7 D3 交接状态
 
@@ -627,8 +631,8 @@ D3 不引入 readback、clear-all wire 或上传级 lifecycle。
   取消共享 staging；清除其他槽位不会取消当前 staging；
 - v2 dynamic branch 不使用旧 `0xff` sentinel，不刷新 auth session；static
   management staging 和 dynamic staging 仍独立；
-- `DYNAMIC_PROTOCOL.md` 已改写为实际 v2 contract；Python/CLI 和桌面 client
-  留待 D5 同步，不能把当前旧 client 当作 v2 client。
+- `DYNAMIC_PROTOCOL.md` 已改写为实际 v2 contract；Python CLI 已在 D5 同步并通过测试，
+  桌面 client 仍由用户单独处理，不能把旧单槽 client 当作 v2 client。
 
 ### 15.2 测试与构建
 
@@ -653,8 +657,8 @@ D3 不引入 readback、clear-all wire 或上传级 lifecycle。
 - `docs/DYNAMIC_PROTOCOL.md`
 - `docs/DYNAMIC_MULTISLOT_PLAN.md`
 
-D3 已提交为本地提交 `cda9d49`；D2 两仓库提交（`4630c76`、`189bc17`）仍按用户
-要求暂不推送。
+D3 提交为 `cda9d49`，D2 模块/配置提交和 D3 均已按当前阶段要求推送；当前配置结构恢复
+提交为 `fb0eaaf`。
 
 ---
 
@@ -740,7 +744,7 @@ policy on/off 由同一 fixture 编译两次（`runtime_macro_usb_hid_test`、
 - `tests/host/runtime_macro_usb_hid_test.c`（多槽 disconnect + policy-off）
 - `docs/DYNAMIC_MULTISLOT_PLAN.md`、`docs/DYNAMIC_MACRO_PLAN.md`
 
-D4 改动尚未提交；D2/D3 提交仍按用户要求暂不推送。
+D4 已提交为 `32f0596` 并已推送；D2/D3 也已推送。
 
 ## 17. D5 实施记录（CLI 子范围）
 
@@ -801,8 +805,9 @@ D4 改动尚未提交；D2/D3 提交仍按用户要求暂不推送。
 - CLI：`--slot`/`--all` 必填与互斥、`dynamic-set` 输出目标槽位、`--all` 成功与部分失败退出码、
   单槽 clear、以及所有无效输入（TTL、非 ASCII、513 bytes、slot `8`/`-1`）零 HID write。
 
-容器内同时运行：`python3 -m py_compile`、`ruff check tools tests/python`（均通过）。本轮未修改
-固件源码，因此不重跑 host suite 与固件构建。
+`py_compile` 在 host 与 `zmk-dev` 中通过，Ruff 在 host 中通过；`zmk-dev` 镜像未安装 Ruff，
+因此容器内 Ruff 未运行。本轮未修改固件源码，host suite 与固件构建结果沿用 D4/D3 记录，
+随后由主 agent 复核 dongle 构建。
 
 ### 17.5 变更文件
 
@@ -811,8 +816,15 @@ D4 改动尚未提交；D2/D3 提交仍按用户要求暂不推送。
 - `docs/CLI.md`
 - `docs/DYNAMIC_MULTISLOT_PLAN.md`、`docs/DYNAMIC_MACRO_PLAN.md`
 
-### 17.6 未完成 / 交接
+### 17.6 当前未完成 / 交接
 
 - 桌面端（含 `DYNAMIC_DESKTOP_APP_SPEC.md` 同步、槽位 UI、逐槽清空与部分失败展示）由用户
-  单独处理；
-- D6 集成回归、完整构建矩阵与最终 RAM/Flash 记录仍待执行；实物验证仍按用户安排暂缓。
+  单独处理；本仓库不修改桌面仓库或桌面规范；
+- 配置仓库已恢复单文件 `boards/shields/leen_totem/leen_totem.keymap`，保留最新 dongle
+  内容：base slot `0`，Macro layer 左手第 3 排 slot `1..5`；本次只编译/验证 dongle；
+- dongle 实机 CLI 已验证：capability `v2/8 slots/512 bytes`，slot `0..5` 上传、slot `7`
+  的 512-byte 边界上传、slot `7` clear、`--all` 逐槽清除和 slot `8` 本地拒绝；slot `1`
+  的 keep flag 上传也已被接受。测试文本已清空；这不等同于物理按键执行后的保留行为验证；
+- 主 agent 已复跑 host/Python/py_compile/Ruff 和 `just totem-dongle`：均通过；当前 dongle
+  RAM/Flash 已记录为 Flash `432468 B`、RAM `198654 / 262144 B`。D6 仍需按用户安排决定
+  是否继续物理按键/TTL/lifecycle/static-auth 流程，并由用户单独完成桌面端。

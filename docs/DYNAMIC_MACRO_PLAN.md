@@ -6,6 +6,9 @@
 
 本文是**实施计划**，不是当前功能说明，也不是最终 wire protocol 契约。Phase 0 已冻结，当前实现进度与阶段门禁记录在本文各阶段完成记录中。
 
+> 当前多槽位 D0–D5 实现和 D6 交接状态以 [`DYNAMIC_MULTISLOT_PLAN.md`](DYNAMIC_MULTISLOT_PLAN.md)
+> 为准；本文早期的单槽位/256-byte 约束和实现章节保留为历史阶段记录。桌面端由用户单独处理。
+
 文档关系：
 
 - [`PLAN.md`](PLAN.md)：产品范围、已确认行为和明确非目标；
@@ -1090,38 +1093,32 @@ Phase 7 交接产物输出；Phase 8 继续负责桌面应用跨组件集成、�
 
 ### 13.5 Phase 8 自动化验证记录（进行中）
 
-Phase 8 的自动化回归和构建矩阵已在 `zmk-dev` devcontainer 内部分完成；实物测试、
-桌面应用集成和最终 release review 仍未完成，因此本阶段不得标记为完成。
+Phase 8 的自动化回归已部分完成；当前配置仓库按用户要求恢复为单文件
+`boards/shields/leen_totem/leen_totem.keymap`，本阶段只保留 dongle 构建结果，不把
+split peripheral 构建写成当前配置的已验证结果。桌面应用由用户单独处理，实物完整
+流程和最终 release review 仍未完成，因此本阶段不得标记为完成。
 
 已完成并复核：
 
 | 项目 | 结果 |
 |---|---|
-| Host C suite（`CLANG=gcc ./tests/host/run.sh`） | 52 个测试二进制全部通过 |
-| Python client/CLI（`python3 -m unittest discover -s tests/python`、`py_compile`、Ruff） | 62 tests、`py_compile`、Ruff 全部通过 |
+| Host C suite（`CLANG=gcc ./tests/host/run.sh`） | 全量四轮通过 |
+| Python client/CLI（`python3 -m unittest discover -s tests/python`、`py_compile`、Ruff） | 70 tests、`py_compile`、Ruff 全部通过 |
 | 现有 static/auth/protocol/USB/dynamic host tests | 无回归 |
-| Central static-only（feature off）构建 | 通过 |
-| Central dynamic-enabled USB 构建 | 通过 |
-| USB transport-off 兼容构建 | 通过 |
-| Studio/CDC ACM 共存构建 | 通过 |
-| 目标 Totem dongle 完整构建（`leen-display raw_hid_adapter leen_totem_dongle`） | Flash `432196 / 811008 B`、RAM `194190 / 262144 B`（剩余 `67954 B`，74.07%），与 Phase 7 保留选项增量基线一致，dongle 基线零回归 |
-| Split peripheral（`totem_left` / `totem_right`） | 角色专用 keymap wrapper 提交（配置仓库 `94caa8f`）后三套构建全部通过 |
+| 目标 Totem dongle 完整构建（`just totem-dongle`） | Flash `432468 B`、RAM `198654 / 262144 B`（剩余 `63490 B`） |
+| dongle CLI 实机管理测试 | v2、8 slots、512 bytes；slot 上传/清除、512-byte 边界、`--all`、slot 越界拒绝通过 |
 
-Split peripheral 说明：共享 keymap 原先直接引用 central-only 的
-`&runtime_macro_dynamic`，`src/runtime_macro_dynamic_guard.c` 的 fail-closed guard
-按设计阻止了 peripheral 构建。修复方向是保持 guard 不放宽，改为角色专用 keymap：
-dongle keymap 保留真实 behavior，left/right wrapper 定义 `RM_NO_DYNAMIC` 后在同一个
-键位编译 `&none`。该改动完全位于配置仓库，本模块仓库和 ZMK 主仓库均未修改。
+dongle 实机测试使用非秘密固定文本。slot `1` 的 keep flag 上传被固件接受，但尚未通过
+物理按键验证执行后保留语义；测试文本已清空。配置 keymap 当前内容为 base slot `0`
+以及 Macro layer 左手第 3 排 dynamic slot `1..5`。
 
 尚未完成（不得声称已验证）：
 
-- 实物测试脚本 A–F：上传/执行/消费、busy、TTL、USB A 管理 → BLE B 输出、
-  lifecycle 边界、static/auth 回归；
-- `--keep-after-execute`（BEGIN flags bit 0）的刷机实物验证；
-- 桌面应用（GUI）跨组件集成：当前只有参考 Python client/CLI 和
-  [`DYNAMIC_DESKTOP_APP_SPEC.md`](DYNAMIC_DESKTOP_APP_SPEC.md) 规范；
-- 最终 release/readiness review、README/文档最终回归，以及 RAM/Flash 最终数值确认；
-- Phase 8 阶段 commit、push 和用户确认。
+- 物理按键执行/消费、busy、TTL、实际 USB disconnect、USB A 管理 → BLE B 输出、
+  reboot 和 static/auth 全流程；
+- `--keep-after-execute` 的物理按键执行后保留验证；
+- 桌面应用（GUI）跨组件集成，由用户单独处理；
+- 完整 D6 构建矩阵、最终 readiness review 和最终文档一致性复核。
 
 ---
 
@@ -1176,11 +1173,12 @@ dongle keymap 保留真实 behavior，left/right wrapper 定义 `RM_NO_DYNAMIC` 
 - [x] USB/profile/output lifecycle host 测试通过
 - [x] Python API/CLI 测试通过
 - [x] 现有 static/auth/USB tests 无回归
-- [x] 所有要求的 devcontainer builds 通过（含 split peripheral，见 13.5）
+- [ ] 所有要求的 devcontainer builds 通过（当前单文件 keymap 只重新验证 dongle）
 - [ ] USB A → BLE B 实物流程通过
-- [ ] RAM/Flash 最终数据已记录（当前 Totem 数值见 13.5）
-- [ ] 用户文档与安全边界已更新
-- [ ] 每个阶段均已独立 commit、push 并获得进入下一阶段的确认
+- [ ] 物理按键执行、消费、TTL、busy 和 lifecycle 流程通过
+- [x] 当前 dongle RAM/Flash 已记录：Flash `432468 B`、RAM `198654 / 262144 B`
+- [x] 当前模块文档与安全边界已同步；桌面规范由用户单独处理
+- [ ] D6 readiness review 完成并获得进入下一阶段的确认
 
 勾选范围说明：`[x]` 只表示已有自动化测试、构建或阶段门禁记录的事项（见 13.5 和各
 阶段完成记录）。RAM 预算的最终接受、硬件实物验证、最终文档回归和阶段确认仍待
@@ -1208,11 +1206,11 @@ Phase 8 收尾；`RAM/Flash 最终数据已记录` 一项保持未勾选，13.5 
 
 - Host C suite（`CLANG=gcc ./tests/host/run.sh`）：全部通过，覆盖默认消费、保留
   策略、未知 flags、TTL、busy/start failure 和 capability bit 6；
-- Python client/CLI：62 tests、`py_compile` 和 Ruff 全部通过；
-- Totem 正式 `just totem-dongle`：FLASH `432196 / 811008 B`，RAM
-  `194190 / 262144 B`，`zmk.uf2` 成功生成；
-- 默认行为保持消费；`--keep-after-execute` 发送 BEGIN flags bit 0，实物验证待
-  新固件刷入后进行。
+- Python client/CLI：70 tests、`py_compile` 和 Ruff 全部通过；
+- Totem 正式 `just totem-dongle`：Flash `432468 B`，RAM
+  `198654 / 262144 B`，`zmk.uf2` 成功生成；
+- 默认行为保持消费；`--keep-after-execute` 的 BEGIN flags bit 0 已完成 CLI 上传验证，
+  物理按键执行后保留语义仍待验证。
 
 ## 18. 后续 TODO（不属于当前交付）
 
