@@ -1107,16 +1107,16 @@ split peripheral 构建写成当前配置的已验证结果。桌面应用由用
 | 现有 static/auth/protocol/USB/dynamic host tests | 无回归 |
 | 目标 Totem dongle 完整构建（`just totem-dongle`） | Flash `432468 B`、RAM `198654 / 262144 B`（剩余 `63490 B`） |
 | dongle CLI 实机管理测试 | v2、8 slots、512 bytes；slot 上传/清除、512-byte 边界、`--all`、slot 越界拒绝通过 |
+| dongle 物理执行测试 | 默认消费、KEEP_AFTER_EXECUTE、busy 保留、TTL 到期、boot reset 清除通过 |
 
-dongle 实机测试使用非秘密固定文本。slot `1` 的 keep flag 上传被固件接受，但尚未通过
-物理按键验证执行后保留语义；测试文本已清空。配置 keymap 当前内容为 base slot `0`
-以及 Macro layer 左手第 3 排 dynamic slot `1..5`。
+dongle 实机测试使用非秘密固定文本。slot `0` 默认执行后第二次无输出；slot `1` 保留策略第二次
+仍输出；slot `2/3` 验证全局 busy 与失败后保留；slot `4` TTL 到期无输出；slot `5` reset 后
+无输出。测试文本已清空。配置 keymap 当前内容为 base slot `0` 以及 Macro layer 左手第 3 排
+dynamic slot `1..5`。
 
 尚未完成（不得声称已验证）：
 
-- 物理按键执行/消费、busy、TTL、实际 USB disconnect、USB A 管理 → BLE B 输出、
-  reboot 和 static/auth 全流程；
-- `--keep-after-execute` 的物理按键执行后保留验证；
+- 实际 USB disconnect、BLE/endpoint lifecycle、USB A 管理 → BLE B 输出和 static/auth 全流程；
 - 桌面应用（GUI）跨组件集成，由用户单独处理；
 - 完整 D6 构建矩阵、最终 readiness review 和最终文档一致性复核。
 
@@ -1175,15 +1175,15 @@ dongle 实机测试使用非秘密固定文本。slot `1` 的 keep flag 上传�
 - [x] 现有 static/auth/USB tests 无回归
 - [ ] 所有要求的 devcontainer builds 通过（当前单文件 keymap 只重新验证 dongle）
 - [ ] USB A → BLE B 实物流程通过
-- [ ] 物理按键执行、消费、TTL、busy 和 lifecycle 流程通过
+- [x] 部分物理流程通过：默认消费、KEEP_AFTER_EXECUTE、busy 保留、TTL 到期、boot reset
+- [ ] 实际 USB disconnect、BLE/endpoint lifecycle、USB A → BLE B 输出和 static/auth 全流程
 - [x] 当前 dongle RAM/Flash 已记录：Flash `432468 B`、RAM `198654 / 262144 B`
 - [x] 当前模块文档与安全边界已同步；桌面规范由用户单独处理
 - [ ] D6 readiness review 完成并获得进入下一阶段的确认
 
-勾选范围说明：`[x]` 只表示已有自动化测试、构建或阶段门禁记录的事项（见 13.5 和各
-阶段完成记录）。RAM 预算的最终接受、硬件实物验证、最终文档回归和阶段确认仍待
-Phase 8 收尾；`RAM/Flash 最终数据已记录` 一项保持未勾选，13.5 中的 Totem 数值是
-当前中间值，最终数值需在 release 复核时确认。
+勾选范围说明：`[x]` 表示已有自动化测试、构建或阶段门禁记录；部分实物项目另按已完成
+的具体范围勾选。RAM 预算的最终接受、剩余硬件流程、完整 D6 构建矩阵和 readiness review
+仍待 Phase 8 收尾。
 
 ## 17. 执行后保留选项增量（实现记录）
 

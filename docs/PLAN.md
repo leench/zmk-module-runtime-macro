@@ -21,9 +21,10 @@ private test data, or credentials.
   `198654 / 262144 B` (remaining `63490 B`).
 - The dongle has completed real v2 capability and CLI management checks: 8 slots,
   512-byte boundary upload, per-slot clear, clear-all iteration, and local slot
-  validation. Physical key execution/consume, busy, TTL, lifecycle, USB-A to
-  Bluetooth-B output, full static/auth regression, desktop integration, and the
-  final release/readiness review remain unverified.
+  validation. Physical default consume, KEEP_AFTER_EXECUTE, busy retention, TTL expiry,
+  and boot reset clearing have also passed. Actual USB disconnect/BLE lifecycle,
+  USB-A to Bluetooth-B output, full physical static/auth regression, desktop integration,
+  and the final release/readiness review remain unverified.
 - The configuration repository currently uses the requested single
   `leen_totem.keymap`; this D6 record only claims the dongle build, not split
   peripheral builds.

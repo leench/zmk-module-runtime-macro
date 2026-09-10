@@ -6,7 +6,8 @@
 >
 > 多槽 store、512-byte executor、参数化 behavior、v2 dynamic wire、多槽 lifecycle
 > clear 和 Python CLI 已落地。dongle 已完成 v2 capability、slot 上传/清除和边界 CLI
-> 实机验证；物理按键执行、TTL/lifecycle 全流程、桌面端和完整 D6 矩阵仍未完成。
+> 实机验证；默认消费、KEEP_AFTER_EXECUTE、busy 保留、TTL 到期和 boot reset 已通过；实际
+> USB disconnect/BLE/endpoint lifecycle、桌面端和完整 D6 矩阵仍未完成。
 > [`DYNAMIC_PROTOCOL.md`](DYNAMIC_PROTOCOL.md) 描述实际 v2 contract：
 > `CAPABILITIES (0x23)` 返回 capability v2、配置槽数和最大 `512` bytes；dynamic
 > opcode 只接受有效 `0..N-1` slot，`0xff` 返回 `BAD_SLOT`。Python CLI 已按该 v2
@@ -366,7 +367,7 @@ executor snapshot `+256 B`，合计 `+4464 B`；最新 dongle dynamic-on 构建�
 | Lifecycle（`tests/host/runtime_macro_dynamic_lifecycle_test.c`） | 每槽独立 setup：policy on 清全部 slot + staging + TTL work；部分槽/已到期槽/空槽混合 boundary；boot reset；policy off 保留全部；NULL event 拒绝；Settings/static 调用为 0 |
 | Python（`tests/python/test_runtime_macro_cli.py`） | capability v1/v2 校验、malformed 拒绝；slot 参数与越界拒绝；chunking；默认/显式 TTL；restart 与 final ACK loss；`clear_all_dynamic()` 逐槽循环与部分失败；本地校验零 HID write；PROTECTED 未登录不触发 login |
 | 构建矩阵 | static-only、dynamic off/on、USB transport-off、Studio/CDC 共存、split central、Totem dongle 完整 build + map 对比；split peripheral 仅在显式采用角色 wrapper 时验证，当前单文件配置不宣称已通过 |
-| 实物 | 已完成 dongle v2 capability、slot 上传/清除和 CLI 边界验证；物理按键执行、TTL、busy、USB/BLE lifecycle 和 static/auth 全流程仍待安排 |
+| 实物 | dongle v2 capability、slot 上传/清除和 CLI 边界已通过；默认消费、KEEP_AFTER_EXECUTE、busy 保留、TTL 到期、boot reset 已通过；USB/BLE lifecycle、跨输出和 static/auth 全流程仍待安排 |
 
 ## 11. 阶段划分（D0–D6）
 
@@ -826,5 +827,6 @@ D4 已提交为 `32f0596` 并已推送；D2/D3 也已推送。
   的 512-byte 边界上传、slot `7` clear、`--all` 逐槽清除和 slot `8` 本地拒绝；slot `1`
   的 keep flag 上传也已被接受。测试文本已清空；这不等同于物理按键执行后的保留行为验证；
 - 主 agent 已复跑 host/Python/py_compile/Ruff 和 `just totem-dongle`：均通过；当前 dongle
-  RAM/Flash 已记录为 Flash `432468 B`、RAM `198654 / 262144 B`。D6 仍需按用户安排决定
-  是否继续物理按键/TTL/lifecycle/static-auth 流程，并由用户单独完成桌面端。
+  RAM/Flash 已记录为 Flash `432468 B`、RAM `198654 / 262144 B`。实机已通过默认消费、
+  KEEP_AFTER_EXECUTE、busy 保留、TTL 到期和 boot reset 清除；仍需实际 USB disconnect、
+  BLE/endpoint lifecycle、USB-A→BLE-B 输出和 static/auth 全流程，并由用户单独完成桌面端。
