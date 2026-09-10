@@ -1231,7 +1231,7 @@ Phase 8 收尾；`RAM/Flash 最终数据已记录` 一项保持未勾选，13.5 
 - 优先使用共享 staging buffer，重新评估 RAM、wire compatibility 和测试矩阵。
 
 多槽位目标设计已在 [`DYNAMIC_MULTISLOT_PLAN.md`](DYNAMIC_MULTISLOT_PLAN.md) 中冻结
-（D0，标注为“设计已确认、尚未实现”）。已确认的关键决策：
+（D0 设计冻结；D1 多槽 store 已实现，见该文档第 13 节）。已确认的关键决策：
 
 - 破坏式升级：直接修改现有 `CAPABILITIES (0x23)`，不保留旧客户端/旧固件兼容；
 - dynamic opcode 的 `slot` 只接受 `0..7`，`0xff` 返回 `BAD_SLOT`；
@@ -1240,4 +1240,5 @@ Phase 8 收尾；`RAM/Flash 最终数据已记录` 一项保持未勾选，13.5 
 - 继续无 dynamic readback，且仍为单 active upload、单 executor、全局互斥；
 - 仍只允许非秘密临时文本，安全边界不放宽。
 
-当前实现仍是 1 个槽位、最大 256 bytes；上述扩展需单独设计、实现、验证和提交。
+交付给用户的 wire、behavior 和客户端行为仍是 1 个槽位、最大 256 bytes：D1 只落地了
+RAM 多槽 store，尚未通过 wire、behavior 或客户端暴露，其余阶段需单独实现、验证和提交。

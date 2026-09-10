@@ -383,3 +383,117 @@ D1 必须用全新 build 目录和 map 实测确认，并记录 `.bss.runtime_ma
 - **桌面状态表达**：无 readback 决定了 UI 只能显示本地观察状态，需要产品确认文案；
 - **实物验证**：用户已暂缓，D6 完成标准和 Phase 8 的实物项在验证前不得标记完成；
 - **上传级 lifecycle**：仍为 backlog，多槽位实现不得顺带引入。
+
+---
+
+## 13. D1 实施记录
+
+### 13.1 状态
+
+D1 已完成并已在 `zmk-dev` devcontainer 内验证；**D2 尚未开始**，因此以下目标行为仍
+未交付给用户：
+
+- wire contract 仍是 v1 单对象（`0xff` sentinel、capability v1、最大 `256`）；
+- 物理 behavior 仍是零参数，只作用于旧 slot 0；
+- executor snapshot 仍是 `CONFIG_ZMK_RUNTIME_MACRO_MAX_TEXT_LEN` 与旧
+  `256`-byte 上限；
+- 本阶段没有修改 `DYNAMIC_PROTOCOL.md`、protocol opcode、Python client/CLI、
+  桌面应用、DTS/binding、behavior 或 ZMK 主仓库。
+
+### 13.2 已实现内容
+
+- 新增 `CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_SLOT_COUNT`（`int`，默认 `8`，范围
+  `1..8`，`depends on ZMK_RUNTIME_MACRO_DYNAMIC`）；
+- `src/runtime_macro_dynamic_internal.h`：每槽固定 `512`-byte committed
+  buffer、单共享 `512`-byte staging buffer、每槽 `length/valid/consume`、
+  `ttl_deadline_ms`、`ttl_generation`，以及全局 `ttl_generation`/`ttl_work_generation`；
+- `src/runtime_macro_dynamic.c`：slot-aware 的 begin/append/clear/execute、
+  `clear_all`、单一 delayable TTL work（总是排到最早 deadline，并在 handler 中重
+  新扫描）、每槽到期只清该槽、stale generation 保护、commit/clear/expire/cancel
+  全部 zeroize；
+- 兼容入口：`begin`/`begin_with_options`/`append`/`execute` 固定作用于 slot 0，
+  `clear` 保持 v1 的“整个 dynamic 状态清除”语义（即 `clear_all`），因此现有
+  protocol、behavior、USB reset 与 lifecycle 调用点无需修改；
+- store 全程不调用 `settings_save_one()`、`settings_delete()`、
+  `zmk_runtime_macro_slot_set()`、`zmk_runtime_macro_slot_clear()`（测试用计数器断言为 0）。
+
+### 13.3 D1 明确限制（D2 前置）
+
+- store 已能保存每槽 `512` bytes，但执行仍受当前 executor snapshot 限制：超过
+  `ZMK_RUNTIME_MACRO_DYNAMIC_EXECUTABLE_MAX_TEXT_LEN`（`256`）的 committed text
+  执行时返回 `-EINVAL`，**绝不截断**，并完整保留在槽内；
+- 旧单对象入口（begin/append/execute）继续把长度限制在 `256`，与冻结的 v1 wire
+  和当前 executor 一致；
+- D2 必须把 executor snapshot 提升到 `512`，然后删除/替换
+  `ZMK_RUNTIME_MACRO_DYNAMIC_EXECUTABLE_MAX_TEXT_LEN` 与旧 `256` 常量，并迁移 behavior 到
+  参数化槽位绑定。
+
+### 13.4 测试记录
+
+容器内 `CLANG=gcc ./tests/host/run.sh`：GCC、GCC sanitizer、替代编译器、替代编译器
+sanitizer 四轮全部通过（含新增的 Kconfig slot-count 静态门禁检查）。
+
+`tests/host/runtime_macro_dynamic_store_test.c` 覆盖：8 槽隔离与 `0..7` 寻址；越界
+slot 拒绝（begin/append/execute/clear）且不改动任何 committed；`1/22/23/256/511/512`
+长度与 `0/513` 拒绝；512 bytes = 24 chunks；共享 staging 的目标槽记录、跨槽 BEGIN
+替换 staging 但保留所有 committed、DATA slot 不匹配取消 staging；同槽 clear 幂等、
+不影响其他槽；`clear_all`；每槽独立 TTL 与最早 deadline 单 work；stale generation
+（旧 work 不得清除较新的 commit）；commit/clear/expire/cancel 的 zeroize；
+Settings/static slot 调用数为 0；clear_all 与 final append 的并发竞态。
+
+既有 protocol、USB HID、executor、lifecycle（policy on/off）host 测试同步迁移到
+`runtime_macro_dynamic_state.slots[0U]` 单槽视图，语义与断言未放宽。
+
+### 13.5 构建与 RAM/Flash 实测
+
+全新 build 目录（`west build -b nice_nano//zmk -s /workspaces/zmk/app`，snippet
+`studio-rpc-usb-uart`，shield `leen_display raw_hid_adapter leen_totem_dongle`），
+配置仓库为当前 commit 的副本（dynamic on），baseline 使用 `0c48c0a` 的模块快照：
+
+| 构建 | Flash | RAM | 余量 |
+| --- | ---: | ---: | ---: |
+| baseline（D1 之前，dynamic on） | `432196 B` | `194190 B`（74.08%） | `67954 B` |
+| D1 dynamic on | `432356 B` | `198398 B`（75.68%） | `63746 B` |
+| D1 dynamic off | `429632 B` | `193294 B`（73.74%） | `68850 B` |
+
+D1 相对 baseline：Flash `+160 B`，RAM `+4208 B`，与设计预期（约 +4.2 KB）一致。
+
+map 结论：
+
+- `.bss.runtime_macro_dynamic_state`：baseline `0x230`（560 B）→ D1 `0x12a0`
+  （4768 B）；
+- `.bss.runtime_macro_executor`：两者均为 `0x114`（276 B），本阶段未改变 executor
+  容量；
+- `.data.runtime_macro_dynamic_ttl_work`（`0x30`）为单一 TTL work item；
+- dynamic off：`compile_commands.json` 与 map 均不含 `runtime_macro_dynamic.c`
+  （只有 `runtime_macro_dynamic_guard.c` 的 guard 调试信息），即 feature-off 不编译
+  dynamic store；
+- USB-off fail-closed：同时请求 `CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC=y` 与
+  `CONFIG_ZMK_RUNTIME_MACRO_USB_HID=n` 时，Kconfig 将 dynamic 解析为未启用，
+  被引用的 dynamic 节点触发 `runtime_macro_dynamic_guard.c` 的
+  `#error "runtime_macro_dynamic is referenced but its feature/driver is disabled"`，
+  构建按设计失败。
+
+参考客户端回归：`python3 -m unittest discover -s tests/python` 62 tests 通过，
+`py_compile` 通过（本阶段未修改 Python/client 代码）。
+
+### 13.6 D1 变更文件
+
+- `Kconfig`：新增 `ZMK_RUNTIME_MACRO_DYNAMIC_SLOT_COUNT`；
+- `src/runtime_macro_dynamic_internal.h`：多槽 state、常量、slot-aware 与兼容 API；
+- `src/runtime_macro_dynamic.c`：多槽 store、单 TTL work、slot/全量 clear、执行边界；
+- `tests/host/runtime_macro_dynamic_store_test.c`：重写为多槽覆盖；
+- `tests/host/runtime_macro_dynamic_gate_test.c`：更新为 512/slot 常量断言；
+- `tests/host/runtime_macro_protocol_test.c`、`tests/host/runtime_macro_usb_hid_test.c`、
+  `tests/host/runtime_macro_executor_test.c`、
+  `tests/host/runtime_macro_dynamic_lifecycle_test.c`、
+  `tests/host/runtime_macro_dynamic_lifecycle_policy_off_test.c`：迁移到 slot 0 视图；
+- `tests/host/run.sh`：新增 Kconfig slot-count 静态门禁；
+- 本文档。
+
+### 13.7 D2 待办（未开始）
+
+- executor snapshot 提升到 `512 + 1`（并移除 `256` 旧常量）；
+- 参数化 `&runtime_macro_dynamic <slot>` behavior 与 DTS binding 迁移；
+- keymap 迁移说明与配置仓库同步（含 split peripheral wrapper）；
+- 越界槽位在 behavior 层的安全拒绝与不消费。

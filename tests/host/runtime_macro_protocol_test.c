@@ -939,22 +939,22 @@ static void test_storage_errors_and_clear(void) {
 }
 
 static void expect_dynamic_text(const uint8_t *expected, size_t length) {
-  EXPECT_TRUE(runtime_macro_dynamic_state.committed_valid);
-  EXPECT_EQ(length, runtime_macro_dynamic_state.committed_length);
-  EXPECT_TRUE(memcmp(runtime_macro_dynamic_state.committed, expected, length) ==
+  EXPECT_TRUE(runtime_macro_dynamic_state.slots[0U].committed_valid);
+  EXPECT_EQ(length, runtime_macro_dynamic_state.slots[0U].committed_length);
+  EXPECT_TRUE(memcmp(runtime_macro_dynamic_state.slots[0U].committed, expected, length) ==
               0);
   for (size_t i = length;
-       i < sizeof(runtime_macro_dynamic_state.committed); i++) {
-    EXPECT_EQ(0, runtime_macro_dynamic_state.committed[i]);
+       i < sizeof(runtime_macro_dynamic_state.slots[0U].committed); i++) {
+    EXPECT_EQ(0, runtime_macro_dynamic_state.slots[0U].committed[i]);
   }
 }
 
 static void expect_dynamic_empty(void) {
-  EXPECT_TRUE(!runtime_macro_dynamic_state.committed_valid);
-  EXPECT_EQ(0, runtime_macro_dynamic_state.committed_length);
+  EXPECT_TRUE(!runtime_macro_dynamic_state.slots[0U].committed_valid);
+  EXPECT_EQ(0, runtime_macro_dynamic_state.slots[0U].committed_length);
   EXPECT_TRUE(!runtime_macro_dynamic_state.staging_active);
-  for (size_t i = 0; i < sizeof(runtime_macro_dynamic_state.committed); i++) {
-    EXPECT_EQ(0, runtime_macro_dynamic_state.committed[i]);
+  for (size_t i = 0; i < sizeof(runtime_macro_dynamic_state.slots[0U].committed); i++) {
+    EXPECT_EQ(0, runtime_macro_dynamic_state.slots[0U].committed[i]);
   }
   for (size_t i = 0; i < sizeof(runtime_macro_dynamic_state.staging); i++) {
     EXPECT_EQ(0, runtime_macro_dynamic_state.staging[i]);
@@ -1113,10 +1113,10 @@ static void test_dynamic_upload_sizes_ttl_and_no_readback(void) {
     }
     expect_dynamic_text(text, length);
     if (test == 0U) {
-      EXPECT_EQ(300000, runtime_macro_dynamic_state.ttl_deadline_ms);
+      EXPECT_EQ(300000, runtime_macro_dynamic_state.slots[0U].ttl_deadline_ms);
     }
     if (test == 1U) {
-      EXPECT_EQ(600000, runtime_macro_dynamic_state.ttl_deadline_ms);
+      EXPECT_EQ(600000, runtime_macro_dynamic_state.slots[0U].ttl_deadline_ms);
     }
 
     make_request(request, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_CLEAR,
@@ -1143,7 +1143,7 @@ static void test_dynamic_keep_after_execute(void) {
       request, response);
   dynamic_data(&protocol, 60, 0, 1, "k", 1, request, response);
   expect_dynamic_text((const uint8_t *)"k", 1);
-  EXPECT_TRUE(!runtime_macro_dynamic_state.committed_consume_on_accept);
+  EXPECT_TRUE(!runtime_macro_dynamic_state.slots[0U].committed_consume_on_accept);
   EXPECT_EQ(0, zmk_runtime_macro_dynamic_execute());
   expect_dynamic_text((const uint8_t *)"k", 1);
 

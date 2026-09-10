@@ -17,6 +17,18 @@ if ! printf '%s\n' "$ble_policy_block" | grep -q 'depends on ZMK_BLE'; then
 fi
 printf '%s\n' "runtime macro BLE lifecycle policy gate: PASS"
 
+dynamic_slot_block=$(sed -n '/^config ZMK_RUNTIME_MACRO_DYNAMIC_SLOT_COUNT$/,/^config /p' "$root_dir/Kconfig")
+if ! printf '%s\n' "$dynamic_slot_block" | grep -q 'depends on ZMK_RUNTIME_MACRO_DYNAMIC'; then
+    echo "runtime macro dynamic slot count dependency: FAIL"
+    exit 1
+fi
+if ! printf '%s\n' "$dynamic_slot_block" | grep -q 'default 8' ||
+   ! printf '%s\n' "$dynamic_slot_block" | grep -q 'range 1 8'; then
+    echo "runtime macro dynamic slot count range: FAIL"
+    exit 1
+fi
+printf '%s\n' "runtime macro dynamic slot count gate: PASS"
+
 test_sources="runtime_macro_slots_test runtime_macro_executor_test runtime_macro_protocol_test runtime_macro_protocol_no_ble_policy_test runtime_macro_usb_hid_test runtime_macro_usb_hid_policy_off_test runtime_macro_auth_test runtime_macro_auth_protocol_test runtime_macro_dynamic_gate_test runtime_macro_dynamic_store_test runtime_macro_dynamic_behavior_test runtime_macro_dynamic_lifecycle_test runtime_macro_dynamic_lifecycle_policy_off_test"
 
 test_suite() {

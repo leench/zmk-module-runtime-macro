@@ -51,9 +51,9 @@ static void commit_text(const char *text) {
 
 static void expect_committed(const char *text) {
   size_t length = strlen(text);
-  assert(runtime_macro_dynamic_state.committed_valid);
-  assert(runtime_macro_dynamic_state.committed_length == length);
-  assert(memcmp(runtime_macro_dynamic_state.committed, text, length) == 0);
+  assert(runtime_macro_dynamic_state.slots[0U].committed_valid);
+  assert(runtime_macro_dynamic_state.slots[0U].committed_length == length);
+  assert(memcmp(runtime_macro_dynamic_state.slots[0U].committed, text, length) == 0);
 }
 
 static void test_profile_and_endpoint_clear(void) {
@@ -62,14 +62,14 @@ static void test_profile_and_endpoint_clear(void) {
   zmk_runtime_macro_dynamic_reset();
   commit_text("profile");
   assert(runtime_macro_dynamic_profile_listener(&event) == 0);
-  assert(!runtime_macro_dynamic_state.committed_valid);
-  assert(runtime_macro_dynamic_state.ttl_deadline_ms == 0);
+  assert(!runtime_macro_dynamic_state.slots[0U].committed_valid);
+  assert(runtime_macro_dynamic_state.slots[0U].ttl_deadline_ms == 0);
   assert(!runtime_macro_dynamic_ttl_work.scheduled);
 
   commit_text("endpoint");
   assert(runtime_macro_dynamic_endpoint_listener(&event) == 0);
-  assert(!runtime_macro_dynamic_state.committed_valid);
-  assert(runtime_macro_dynamic_state.ttl_deadline_ms == 0);
+  assert(!runtime_macro_dynamic_state.slots[0U].committed_valid);
+  assert(runtime_macro_dynamic_state.slots[0U].ttl_deadline_ms == 0);
   assert(!runtime_macro_dynamic_ttl_work.scheduled);
 }
 

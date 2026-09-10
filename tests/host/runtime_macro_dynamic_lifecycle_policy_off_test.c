@@ -53,21 +53,21 @@ static void test_default_preservation(void) {
   zmk_runtime_macro_dynamic_reset();
   commit_text("profile");
   assert(runtime_macro_dynamic_profile_listener(&event) == 0);
-  assert(runtime_macro_dynamic_state.committed_valid);
-  assert(runtime_macro_dynamic_state.committed_length == 7U);
+  assert(runtime_macro_dynamic_state.slots[0U].committed_valid);
+  assert(runtime_macro_dynamic_state.slots[0U].committed_length == 7U);
 
   commit_text("endpoint");
   assert(runtime_macro_dynamic_endpoint_listener(&event) == 0);
-  assert(runtime_macro_dynamic_state.committed_valid);
-  assert(runtime_macro_dynamic_state.committed_length == 8U);
+  assert(runtime_macro_dynamic_state.slots[0U].committed_valid);
+  assert(runtime_macro_dynamic_state.slots[0U].committed_length == 8U);
 }
 
 static void test_invalid_event_is_rejected(void) {
   commit_text("kept");
   assert(runtime_macro_dynamic_profile_listener(NULL) == -EINVAL);
   assert(runtime_macro_dynamic_endpoint_listener(NULL) == -EINVAL);
-  assert(runtime_macro_dynamic_state.committed_valid);
-  assert(runtime_macro_dynamic_state.committed_length == 4U);
+  assert(runtime_macro_dynamic_state.slots[0U].committed_valid);
+  assert(runtime_macro_dynamic_state.slots[0U].committed_length == 4U);
 }
 
 int main(void) {

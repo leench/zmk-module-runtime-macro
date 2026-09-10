@@ -509,9 +509,9 @@ static void commit_dynamic(const uint8_t *text, size_t length,
 }
 
 static void expect_dynamic_committed(const uint8_t *expected, size_t length) {
-    EXPECT_TRUE(runtime_macro_dynamic_state.committed_valid);
-    EXPECT_EQ(length, runtime_macro_dynamic_state.committed_length);
-    EXPECT_EQ(0, memcmp(expected, runtime_macro_dynamic_state.committed, length));
+    EXPECT_TRUE(runtime_macro_dynamic_state.slots[0U].committed_valid);
+    EXPECT_EQ(length, runtime_macro_dynamic_state.slots[0U].committed_length);
+    EXPECT_EQ(0, memcmp(expected, runtime_macro_dynamic_state.slots[0U].committed, length));
 }
 
 static void run_executor_to_completion(size_t length) {
@@ -532,8 +532,8 @@ static void test_dynamic_snapshot_and_consume(void) {
     commit_dynamic(text, sizeof(text), 300U);
     EXPECT_EQ(1, schedule_calls); /* Dynamic TTL work. */
     EXPECT_EQ(0, zmk_runtime_macro_dynamic_execute());
-    EXPECT_TRUE(!runtime_macro_dynamic_state.committed_valid);
-    EXPECT_EQ(0, runtime_macro_dynamic_state.ttl_deadline_ms);
+    EXPECT_TRUE(!runtime_macro_dynamic_state.slots[0U].committed_valid);
+    EXPECT_EQ(0, runtime_macro_dynamic_state.slots[0U].ttl_deadline_ms);
     EXPECT_TRUE(!runtime_macro_dynamic_ttl_work.scheduled);
     EXPECT_TRUE(zmk_runtime_macro_is_busy());
     EXPECT_EQ(sizeof(text), runtime_macro_executor.length);
@@ -556,7 +556,7 @@ static void test_dynamic_empty_expired_and_busy(void) {
     commit_dynamic(dynamic_text, sizeof(dynamic_text) - 1U, 1U);
     host_uptime += 1000;
     EXPECT_EQ(0, zmk_runtime_macro_dynamic_execute());
-    EXPECT_TRUE(!runtime_macro_dynamic_state.committed_valid);
+    EXPECT_TRUE(!runtime_macro_dynamic_state.slots[0U].committed_valid);
     EXPECT_EQ(0, event_count);
     EXPECT_TRUE(!zmk_runtime_macro_is_busy());
 
@@ -573,7 +573,7 @@ static void test_dynamic_empty_expired_and_busy(void) {
     commit_dynamic(dynamic_text, sizeof(dynamic_text) - 1U, 300U);
     EXPECT_EQ(0, zmk_runtime_macro_dynamic_execute());
     EXPECT_EQ(-EBUSY, zmk_runtime_macro_execute(0));
-    EXPECT_TRUE(!runtime_macro_dynamic_state.committed_valid);
+    EXPECT_TRUE(!runtime_macro_dynamic_state.slots[0U].committed_valid);
     run_executor_to_completion(sizeof(dynamic_text) - 1U);
 }
 

@@ -78,6 +78,17 @@ config ZMK_RUNTIME_MACRO_DYNAMIC
       not select or enable the USB transport. The dynamic macro source is
       central-side only.
 
+config ZMK_RUNTIME_MACRO_DYNAMIC_SLOT_COUNT
+    int "Number of dynamic macro slots"
+    default 8
+    range 1 8
+    depends on ZMK_RUNTIME_MACRO_DYNAMIC
+    help
+      Number of independent RAM-only dynamic macro slots. Each slot holds up
+      to 512 bytes of text and keeps its own TTL and post-execution policy.
+      All slots share one staging buffer and the single macro executor, so
+      only one upload and one execution can be active at a time.
+
 config ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_USB_DISCONNECT
     bool "Clear dynamic macro on management USB disconnect"
     default y

@@ -909,9 +909,9 @@ static void commit_dynamic_test_text(const char *text) {
 
 static void expect_dynamic_test_text(const char *text) {
   size_t length = strlen(text);
-  EXPECT_TRUE(runtime_macro_dynamic_state.committed_valid);
-  EXPECT_EQ(length, runtime_macro_dynamic_state.committed_length);
-  EXPECT_TRUE(memcmp(runtime_macro_dynamic_state.committed, text, length) == 0);
+  EXPECT_TRUE(runtime_macro_dynamic_state.slots[0U].committed_valid);
+  EXPECT_EQ(length, runtime_macro_dynamic_state.slots[0U].committed_length);
+  EXPECT_TRUE(memcmp(runtime_macro_dynamic_state.slots[0U].committed, text, length) == 0);
 }
 
 #if CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_USB_DISCONNECT
@@ -966,7 +966,7 @@ static void test_dynamic_disconnect_policy_and_generation_race(void) {
   event.conn_state = ZMK_USB_CONN_NONE;
   EXPECT_EQ(0, runtime_macro_usb_hid_conn_state_listener(
                    (const zmk_event_t *)&event));
-  EXPECT_TRUE(!runtime_macro_dynamic_state.committed_valid);
+  EXPECT_TRUE(!runtime_macro_dynamic_state.slots[0U].committed_valid);
 
   /* A queued final DATA request racing the disconnect carries the old
    * generation. The transport reset clears the committed object before the
@@ -1000,7 +1000,7 @@ static void test_dynamic_disconnect_policy_and_generation_race(void) {
   reset_after_online_check = true;
   usb_status = USB_DC_CONFIGURED;
   EXPECT_EQ(0, runtime_macro_usb_hid_set_report(&hid1, &setup, &len, &data));
-  EXPECT_TRUE(!runtime_macro_dynamic_state.committed_valid);
+  EXPECT_TRUE(!runtime_macro_dynamic_state.slots[0U].committed_valid);
   EXPECT_EQ(1, k_msgq_used(&runtime_macro_usb_hid_msgq));
   EXPECT_EQ(saves_before_disconnect, save_calls);
 
