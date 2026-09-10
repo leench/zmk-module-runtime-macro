@@ -1,30 +1,41 @@
 # ZMK Runtime Macro Development Plan
 
 This document records the public project scope, implementation status, and the
-planned RAM-only dynamic macro feature. The dynamic macro feature described in
-this document is **planned only**: it has not been implemented, tested, or
-committed as firmware code.
+implemented RAM-only dynamic macro feature.
 
 The document does not contain machine-specific build paths, device identifiers,
 private test data, or credentials.
 
 ## Status
 
-- Phases 1–5 are implemented and committed, including the v2-authenticated
-  reference Python client.
+- Static phases 1–5 are implemented and committed, including the
+  v2-authenticated reference Python client.
+- The RAM-only dynamic macro is implemented and committed through dynamic
+  phases 1–7: feature gate, RAM store and TTL, shared executor with consume
+  semantics, the `&runtime_macro_dynamic` keymap behavior, the dynamic protocol
+  and capability query, lifecycle clear policies, and the reference Python
+  client/CLI with upload and clear (no readback).
+- Dynamic phase 8 (integration, hardware validation, and final documentation) is
+  only partly complete. Automation passes: host C suite (52 test binaries),
+  Python tests/`py_compile`/Ruff, the required devcontainer build matrix, and
+  the target Totem dongle build (Flash `432196 / 811008 B`, RAM
+  `194190 / 262144 B`). Recorded in
+  [`DYNAMIC_MACRO_PLAN.md`](DYNAMIC_MACRO_PLAN.md) section 13.5.
+- Still unverified: every physical hardware workflow (upload/execute/consume,
+  busy, TTL, management USB disconnect, USB-A management to Bluetooth-B output,
+  and `KEEP_AFTER_EXECUTE`), desktop application integration, and the final
+  release/readiness review. The dynamic phase 8 completion list must not be
+  treated as satisfied.
 - Phase 6 hardware validation is in progress; physical password authentication
-  has not yet been verified.
-- One compatible central device has completed a real HID protocol round trip
-  and slot read/write check.
-- The RAM-only dynamic macro design is agreed at the product level but is not
-  implemented.
+  has not yet been verified. One compatible central device has completed a real
+  HID protocol round trip and slot read/write check.
 - Physical key output, reboot/NVS retention, portability across other boards
   and host backends, and complete hardware lifecycle validation still need
   verification.
 
 ## Current architecture
 
-The current feature is a Flash-backed runtime macro system:
+The static feature is a Flash-backed runtime macro system:
 
 ```text
 static macro slot
@@ -35,12 +46,17 @@ static macro slot
     -> normal keyboard HID output
 ```
 
+The RAM-only dynamic macro adds one temporary text object that lives only in
+volatile RAM, uses the same executor, and is written through the dynamic
+commands on the same management transport. Its state and commands are separate
+from the static slot store; see [`DYNAMIC_PROTOCOL.md`](DYNAMIC_PROTOCOL.md).
+
 The optional management transport is a dedicated vendor USB HID interface,
 defaulting to `HID_1`. ZMK's normal keyboard HID remains `HID_0`.
 
-The current executor is a single delayable-work state machine. Static macro
-execution and any future dynamic macro execution must share this executor; a
-second macro is rejected with `-EBUSY` and is not queued.
+The current executor is a single delayable-work state machine. Static and
+dynamic macro execution share this executor; a second macro is rejected with
+`-EBUSY` and is not queued.
 
 ## Completed phases
 
@@ -118,13 +134,15 @@ second macro is rejected with `-EBUSY` and is not queued.
   environments where applicable.
 - Measure practical timing and confirm display/UART behavior on the target
   hardware.
+- Complete the dynamic phase 8 physical workflows and desktop integration in
+  [`DYNAMIC_MACRO_PLAN.md`](DYNAMIC_MACRO_PLAN.md) sections 13.2 and 13.5.
 
-# Planned feature: RAM-only dynamic macro
+# RAM-only dynamic macro (implemented)
 
 ## Goal
 
-Add one temporary, RAM-only macro object that can be written by a background
-service and executed by a physical keyboard behavior:
+The dynamic macro provides one temporary, RAM-only macro object that can be
+written by a background service and executed by a physical keyboard behavior:
 
 ```text
 background service
@@ -136,15 +154,20 @@ background service
     -> selected USB/Bluetooth keyboard output
 ```
 
-The dynamic macro feature is intended for:
+The dynamic macro feature is intended for **non-secret temporary text only**:
 
-- injecting one-time OTP or verification codes;
-- injecting a code received from a phone or another live source;
 - writing temporary text, switching the keyboard's Bluetooth profile/output,
-  and then typing the text into another host device.
+  and then typing the text into another host device;
+- typing short temporary text produced by a local background service.
 
-All output must continue to be generated as normal ZMK keycode events. The
-feature must not construct raw keyboard HID reports or create a second output
+The dynamic management channel is unencrypted and is not covered by the static
+password/authentication gate, so passwords, PINs, OTP/verification codes,
+tokens, API keys, and other credentials must not be sent through it. See
+[`DYNAMIC_PROTOCOL.md`](DYNAMIC_PROTOCOL.md) section 7 and the security boundary
+section below.
+
+All output continues to be generated as normal ZMK keycode events. The feature
+does not construct raw keyboard HID reports and does not create a second output
 worker.
 
 ## Product decisions for the first implementation
@@ -168,8 +191,8 @@ worker.
 | Management USB disconnect | Clear by default when an actual disconnect is detected |
 | Host shutdown while USB remains powered | Not guaranteed to be detectable |
 
-A single dynamic macro is sufficient for the current OTP, phone-code, and
-cross-Bluetooth-device text-transfer use cases. A new complete upload replaces
+A single dynamic macro is sufficient for the current non-secret temporary-text
+and cross-Bluetooth-device transfer use cases. A new complete upload replaces
 the previous committed text atomically. An incomplete or invalid upload must
 not destroy the previous committed text unless an explicit clear is requested.
 
@@ -196,9 +219,9 @@ References:
 - [ZMK Output Selection Behavior](https://zmk.dev/docs/keymaps/behaviors/outputs)
 - [ZMK Bluetooth Behavior](https://zmk.dev/docs/keymaps/behaviors/bluetooth)
 
-## Proposed keymap behavior
+## Keymap behavior
 
-The first version adds a behavior without a slot parameter:
+The implemented behavior takes no slot parameter:
 
 ```dts
 #include <behaviors/runtime_macro.dtsi>
@@ -220,11 +243,12 @@ Behavior semantics:
 The selected ZMK output destination determines whether the generated key events
 reach USB or the active Bluetooth profile.
 
-## Proposed protocol surface
+## Protocol surface
 
 The dynamic protocol uses the existing fixed 32-byte frame and 22-byte payload.
-The exact opcode values and capability advertisement are to be finalized during
-implementation, but the first-version command set is:
+[`DYNAMIC_PROTOCOL.md`](DYNAMIC_PROTOCOL.md) is the frozen, authoritative wire
+contract; the summary below is a non-normative overview of the implemented
+command set:
 
 ```text
 DYNAMIC_BEGIN
@@ -337,8 +361,8 @@ single-executor `-EBUSY` behavior are sufficient for the current use cases.
 
 ## Multiple dynamic macros: future extension
 
-The first implementation supports exactly one dynamic macro. If future use
-cases require an OTP and a separate preloaded text at the same time, the design
+The current implementation supports exactly one dynamic macro. If future use
+cases require multiple independent temporary texts at the same time, the design
 can be extended without changing the basic executor model:
 
 ```dts
@@ -352,10 +376,13 @@ A future extension may add a separate configuration such as:
 CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_SLOT_COUNT
 ```
 
-A practical future hard limit would be 4 slots. The extension should still
-keep only one upload staging transaction and one executor. Each slot would have
-its own committed buffer, length, validity state, and TTL; lifecycle events
-would clear all slots, while execution would clear only the selected slot.
+The agreed follow-up scope is up to 8 independent slots of 512 bytes each with a
+shared staging buffer (see
+[`DYNAMIC_MACRO_PLAN.md`](DYNAMIC_MACRO_PLAN.md) section 18.2). The extension
+must still keep only one upload staging transaction and one executor. Each slot
+would have its own committed buffer, length, validity state, TTL, and per-upload
+lifecycle policy; lifecycle events would clear all slots, while execution would
+clear only the selected slot.
 
 Supporting multiple simultaneous uploads, an execution queue, concurrent output,
 or dynamic `LIST/GET` would be a separate larger feature and is not part of this
@@ -373,14 +400,25 @@ The first version deliberately accepts the following boundary:
 - USB transport is not encrypted;
 - text typed into the target host is observable by that host and its software.
 
-The feature is intended to prevent Flash wear, persistent device storage, and
-readback through the macro management protocol. It is not intended to provide a
-secure secret-entry channel or application identity authentication.
+The dynamic feature is intended to prevent Flash wear, persistent device
+storage, and readback through the macro management protocol. It is not a secure
+secret-entry channel and provides no application identity authentication:
 
-A separate authenticated/sensitive dynamic mode is intentionally out of scope
-for this implementation phase.
+- dynamic commands are processed identically in `OPEN`, `PROTECTED`, and
+  `ERROR_LOCKED` states; they do not pass the static management authorization
+  gate and never refresh an authenticated session;
+- the dynamic channel must therefore be used only for non-secret temporary text;
+  do not send passwords, PINs, OTP/verification codes, tokens, API keys, or any
+  other credential through it;
+- a separate authenticated and encrypted channel is required for secrets and is
+  intentionally out of scope for this implementation phase.
 
 ## Implementation phases for dynamic macro
+
+Dynamic phases 1–7 below are implemented and committed; phase 8 (integration,
+hardware validation, and final documentation) is in progress. The authoritative
+sequence, gates, and completion records are in
+[`DYNAMIC_MACRO_PLAN.md`](DYNAMIC_MACRO_PLAN.md).
 
 ### Dynamic Phase 1: Core RAM store
 
@@ -422,8 +460,9 @@ for this implementation phase.
 - Add keymap and protocol documentation.
 - Add hardware validation for USB A management plus Bluetooth B output.
 
-No dynamic firmware implementation should be started until this plan and the
-wire-level details are reviewed and approved.
+Any further dynamic work (see the backlog at the end of
+[`DYNAMIC_MACRO_PLAN.md`](DYNAMIC_MACRO_PLAN.md)) requires the same review and
+approval sequence before implementation starts.
 
 ## Required dynamic tests
 
