@@ -25,6 +25,9 @@
 #define CONFIG_ZMK_RUNTIME_MACRO_SLOT_COUNT 16
 #define CONFIG_ZMK_RUNTIME_MACRO_MAX_TEXT_LEN 64
 #define CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC 1
+#define CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_SLOT_COUNT 8
+/* Test convenience alias for the explicit slot-zero cases; not a wire sentinel. */
+#define ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT 0U
 #define CONFIG_ZMK_BLE 1
 #define CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_USB_DISCONNECT 1
 #define CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_CLEAR_ON_BLE_PROFILE_CHANGE 1
@@ -961,6 +964,62 @@ static void expect_dynamic_empty(void) {
   }
 }
 
+static void expect_dynamic_slot_text(uint8_t slot, const uint8_t *expected,
+                                     size_t length) {
+  EXPECT_TRUE(runtime_macro_dynamic_state.slots[slot].committed_valid);
+  EXPECT_EQ(length, runtime_macro_dynamic_state.slots[slot].committed_length);
+  EXPECT_TRUE(memcmp(runtime_macro_dynamic_state.slots[slot].committed,
+                     expected, length) == 0);
+  for (size_t i = length;
+       i < sizeof(runtime_macro_dynamic_state.slots[slot].committed); i++) {
+    EXPECT_EQ(0, runtime_macro_dynamic_state.slots[slot].committed[i]);
+  }
+}
+
+static void dynamic_begin_slot_with_flags(
+    struct zmk_runtime_macro_protocol *protocol, uint8_t request_id,
+    uint8_t slot, uint16_t total_length, uint32_t ttl_seconds,
+    uint8_t begin_flags, uint8_t *request, uint8_t *response) {
+  uint8_t payload[5];
+  uint8_t payload_length = 0U;
+  const void *payload_ptr = NULL;
+
+  if (ttl_seconds != 0U) {
+    payload[0] = (uint8_t)ttl_seconds;
+    payload[1] = (uint8_t)(ttl_seconds >> 8);
+    payload[2] = (uint8_t)(ttl_seconds >> 16);
+    payload[3] = (uint8_t)(ttl_seconds >> 24);
+    payload_length = sizeof(uint32_t);
+    if (begin_flags != 0U) {
+      payload[4] = begin_flags;
+      payload_length++;
+    }
+    payload_ptr = payload;
+  } else if (begin_flags != 0U) {
+    payload[0] = begin_flags;
+    payload_length = 1U;
+    payload_ptr = payload;
+  }
+
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION,
+               ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_BEGIN, request_id, 0,
+               slot, 0, total_length, payload_length, payload_ptr);
+  process_request(protocol, request, response);
+  expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_BEGIN,
+                 request_id, slot, 0, total_length, NULL, 0);
+}
+
+static void dynamic_data_slot(struct zmk_runtime_macro_protocol *protocol,
+                              uint8_t request_id, uint8_t slot,
+                              uint16_t offset, uint16_t total_length,
+                              const void *payload, uint8_t payload_length,
+                              uint8_t *request, uint8_t *response) {
+  make_request(request, ZMK_RUNTIME_MACRO_PROTOCOL_VERSION,
+               ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA, request_id, 0,
+               slot, offset, total_length, payload_length, payload);
+  process_request(protocol, request, response);
+}
+
 static void dynamic_begin_with_flags(
     struct zmk_runtime_macro_protocol *protocol, uint8_t request_id,
     uint16_t total_length, uint32_t ttl_seconds, uint8_t begin_flags,
@@ -1045,7 +1104,7 @@ static void test_dynamic_wire_constants_and_capabilities(void) {
   EXPECT_EQ(0x21, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA);
   EXPECT_EQ(0x22, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_CLEAR);
   EXPECT_EQ(0x23, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CAPABILITIES);
-  EXPECT_EQ(0xff, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT);
+  EXPECT_EQ(0, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT);
   EXPECT_EQ(22, ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_PAYLOAD_LENGTH);
   EXPECT_EQ(0x007f,
             ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_FIXED_LIFECYCLE_FLAGS |
@@ -1058,7 +1117,7 @@ static void test_dynamic_wire_constants_and_capabilities(void) {
                0, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 0, 0, 0, NULL);
   process_request(&protocol, request, response);
   uint8_t expected[22] = {
-      1, 1, 0x7f, 0x00, 0x00, 0x01, 0x2c, 0x01, 0x00, 0x00,
+      2, 8, 0x7f, 0x00, 0x00, 0x02, 0x2c, 0x01, 0x00, 0x00,
       0x01, 0x00, 0x00, 0x00, 0x80, 0x51, 0x01, 0x00, 0x1e, 0x00,
       0x00, 0x00,
   };
@@ -1068,10 +1127,11 @@ static void test_dynamic_wire_constants_and_capabilities(void) {
   expect_dynamic_empty();
 
   make_request(request, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CAPABILITIES, 2,
-               0, 0, 0, 0, 0, NULL);
+               0, ZMK_RUNTIME_MACRO_PROTOCOL_LIST_SLOT, 0, 0, 0, NULL);
   process_request(&protocol, request, response);
   expect_error(response, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CAPABILITIES, 2,
-               0, ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_SLOT);
+               ZMK_RUNTIME_MACRO_PROTOCOL_LIST_SLOT,
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_SLOT);
 
   make_request(request, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_CAPABILITIES, 3,
                0, ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 1, 0, 0, NULL);
@@ -1085,8 +1145,8 @@ static void test_dynamic_upload_sizes_ttl_and_no_readback(void) {
   struct zmk_runtime_macro_protocol protocol;
   uint8_t request[32];
   uint8_t response[32];
-  uint8_t text[256];
-  const uint16_t lengths[] = {1, 22, 23, 256};
+  uint8_t text[512];
+  const uint16_t lengths[] = {1, 22, 23, 256, 511, 512};
 
   reset_slots();
   zmk_runtime_macro_protocol_init(&protocol);
@@ -1128,6 +1188,83 @@ static void test_dynamic_upload_sizes_ttl_and_no_readback(void) {
                    ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT, 0, 0, NULL, 0);
     expect_dynamic_empty();
   }
+}
+
+static void test_dynamic_multislot_wire_and_clear_isolation(void) {
+  struct zmk_runtime_macro_protocol protocol;
+  uint8_t request[32];
+  uint8_t response[32];
+  uint8_t text[512];
+
+  reset_slots();
+  zmk_runtime_macro_protocol_init(&protocol);
+  memset(text, 'm', sizeof(text));
+
+  dynamic_begin_slot_with_flags(&protocol, 70, 1, 512, 0U, 0U, request,
+                                response);
+  uint16_t offset = 0U;
+  while (offset < sizeof(text)) {
+    uint8_t chunk = (uint8_t)((sizeof(text) - offset) > 22U
+                                  ? 22U
+                                  : (sizeof(text) - offset));
+    dynamic_data_slot(&protocol, 70, 1, offset, sizeof(text), text + offset,
+                      chunk, request, response);
+    EXPECT_EQ(ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_OK,
+              response[ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_OFFSET]);
+    EXPECT_EQ(1, response[ZMK_RUNTIME_MACRO_PROTOCOL_SLOT_OFFSET]);
+    EXPECT_EQ(offset + chunk,
+              frame_get_u16(response, ZMK_RUNTIME_MACRO_PROTOCOL_OFFSET_OFFSET));
+    offset += chunk;
+  }
+  expect_dynamic_slot_text(1, text, sizeof(text));
+  EXPECT_TRUE(!runtime_macro_dynamic_state.slots[0U].committed_valid);
+
+  commit_dynamic_text(&protocol, 71, (const uint8_t *)"zero", 4U, request,
+                      response);
+  expect_dynamic_slot_text(0, (const uint8_t *)"zero", 4U);
+  expect_dynamic_slot_text(1, text, sizeof(text));
+
+  /* Clearing one slot must not affect another committed slot. */
+  make_request(request, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_CLEAR, 72,
+               0, 0, 0, 0, 0, NULL);
+  process_request(&protocol, request, response);
+  expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_CLEAR, 72,
+                 0, 0, 0, NULL, 0);
+  EXPECT_TRUE(!runtime_macro_dynamic_state.slots[0U].committed_valid);
+  expect_dynamic_slot_text(1, text, sizeof(text));
+
+  /* Clearing a different slot does not cancel the active staging transaction. */
+  dynamic_begin_slot_with_flags(&protocol, 73, 2, 2, 0U, 0U, request,
+                                response);
+  dynamic_data_slot(&protocol, 73, 2, 0, 2, "a", 1, request, response);
+  make_request(request, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_CLEAR, 74,
+               0, 0, 0, 0, 0, NULL);
+  process_request(&protocol, request, response);
+  expect_success(response, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_CLEAR, 74,
+                 0, 0, 0, NULL, 0);
+  EXPECT_TRUE(protocol.dynamic_active);
+  dynamic_data_slot(&protocol, 73, 2, 1, 2, "b", 1, request, response);
+  expect_dynamic_slot_text(2, (const uint8_t *)"ab", 2U);
+  expect_dynamic_slot_text(1, text, sizeof(text));
+
+  /* A DATA slot mismatch is rejected and cancels the one shared staging. */
+  dynamic_begin_slot_with_flags(&protocol, 75, 3, 2, 0U, 0U, request,
+                                response);
+  dynamic_data_slot(&protocol, 75, 4, 0, 2, "x", 1, request, response);
+  expect_error(response, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_DATA, 75,
+               4, ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_SLOT);
+  EXPECT_TRUE(!protocol.dynamic_active);
+  EXPECT_TRUE(!runtime_macro_dynamic_state.staging_active);
+  expect_dynamic_slot_text(1, text, sizeof(text));
+
+  /* 0xff is no longer a dynamic alias and there is no wire clear-all. */
+  make_request(request, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_CLEAR, 76,
+               0, ZMK_RUNTIME_MACRO_PROTOCOL_LIST_SLOT, 0, 0, 0, NULL);
+  process_request(&protocol, request, response);
+  expect_error(response, 2, ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_DYNAMIC_CLEAR, 76,
+               ZMK_RUNTIME_MACRO_PROTOCOL_LIST_SLOT,
+               ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_SLOT);
+  expect_dynamic_slot_text(1, text, sizeof(text));
 }
 
 static void test_dynamic_keep_after_execute(void) {
@@ -1551,6 +1688,7 @@ int main(void) {
   test_storage_errors_and_clear();
   test_dynamic_wire_constants_and_capabilities();
   test_dynamic_upload_sizes_ttl_and_no_readback();
+  test_dynamic_multislot_wire_and_clear_isolation();
   test_dynamic_keep_after_execute();
   test_dynamic_validation_and_restart();
   test_dynamic_clear_and_static_staging_isolation();

@@ -77,6 +77,7 @@ static void runtime_macro_protocol_clear_dynamic_locked(
 
   zmk_runtime_macro_dynamic_cancel_staging();
   protocol->dynamic_active = false;
+  protocol->dynamic_slot = 0U;
   protocol->dynamic_request_id = 0U;
   protocol->dynamic_total_length = 0U;
   protocol->dynamic_received_length = 0U;
@@ -211,6 +212,12 @@ static bool runtime_macro_protocol_slot_is_valid(uint8_t slot) {
   return slot < CONFIG_ZMK_RUNTIME_MACRO_SLOT_COUNT;
 }
 
+#if defined(CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC)
+static bool runtime_macro_protocol_dynamic_slot_is_valid(uint8_t slot) {
+  return slot < zmk_runtime_macro_dynamic_slot_count();
+}
+#endif
+
 static bool runtime_macro_protocol_opcode_is_known(uint8_t opcode) {
   switch (opcode) {
   case ZMK_RUNTIME_MACRO_PROTOCOL_OPCODE_LIST:
@@ -333,8 +340,8 @@ static uint16_t runtime_macro_protocol_dynamic_lifecycle_flags(void) {
 
 static int runtime_macro_protocol_process_capabilities(const uint8_t *request,
                                                        uint8_t *response) {
-  if (request[ZMK_RUNTIME_MACRO_PROTOCOL_SLOT_OFFSET] !=
-      ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT) {
+  const uint8_t slot = request[ZMK_RUNTIME_MACRO_PROTOCOL_SLOT_OFFSET];
+  if (!runtime_macro_protocol_dynamic_slot_is_valid(slot)) {
     runtime_macro_protocol_set_error(
         response, ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_SLOT);
     return 0;
@@ -351,7 +358,7 @@ static int runtime_macro_protocol_process_capabilities(const uint8_t *request,
   const uint16_t lifecycle_flags =
       runtime_macro_protocol_dynamic_lifecycle_flags();
   payload[0] = ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_VERSION;
-  payload[1] = ZMK_RUNTIME_MACRO_PROTOCOL_CAPABILITY_OBJECT_COUNT;
+  payload[1] = zmk_runtime_macro_dynamic_slot_count();
   payload[2] = (uint8_t)lifecycle_flags;
   payload[3] = (uint8_t)(lifecycle_flags >> 8);
   payload[4] = (uint8_t)ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_MAX_LENGTH;
@@ -388,8 +395,8 @@ static int runtime_macro_protocol_process_dynamic_begin(
       ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_DEFAULT_TTL_SECONDS;
   uint8_t begin_flags = 0U;
 
-  if (request[ZMK_RUNTIME_MACRO_PROTOCOL_SLOT_OFFSET] !=
-      ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT) {
+  const uint8_t slot = request[ZMK_RUNTIME_MACRO_PROTOCOL_SLOT_OFFSET];
+  if (!runtime_macro_protocol_dynamic_slot_is_valid(slot)) {
     runtime_macro_protocol_clear_dynamic(protocol);
     runtime_macro_protocol_set_error(
         response, ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_SLOT);
@@ -447,12 +454,13 @@ static int runtime_macro_protocol_process_dynamic_begin(
 
   (void)k_mutex_lock(&runtime_macro_protocol_dynamic_timeout_mutex,
                      K_FOREVER);
-  int err = zmk_runtime_macro_dynamic_begin_with_options(
-      total_length, ttl_seconds,
+  int err = zmk_runtime_macro_dynamic_begin_slot(
+      slot, total_length, ttl_seconds,
       (begin_flags & ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_BEGIN_FLAG_KEEP_AFTER_EXECUTE) ==
           0U);
   if (err == 0) {
     protocol->dynamic_active = true;
+    protocol->dynamic_slot = slot;
     protocol->dynamic_request_id =
         request[ZMK_RUNTIME_MACRO_PROTOCOL_REQUEST_ID_OFFSET];
     protocol->dynamic_total_length = total_length;
@@ -487,11 +495,12 @@ static int runtime_macro_protocol_process_dynamic_data(
       request, ZMK_RUNTIME_MACRO_PROTOCOL_OFFSET_OFFSET);
   const uint16_t total_length = runtime_macro_protocol_get_u16(
       request, ZMK_RUNTIME_MACRO_PROTOCOL_TOTAL_LENGTH_OFFSET);
+  const uint8_t slot = request[ZMK_RUNTIME_MACRO_PROTOCOL_SLOT_OFFSET];
 
   (void)k_mutex_lock(&runtime_macro_protocol_dynamic_timeout_mutex,
                      K_FOREVER);
-  if (request[ZMK_RUNTIME_MACRO_PROTOCOL_SLOT_OFFSET] !=
-      ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT) {
+  if (!runtime_macro_protocol_dynamic_slot_is_valid(slot) ||
+      (protocol->dynamic_active && slot != protocol->dynamic_slot)) {
     runtime_macro_protocol_clear_dynamic_locked(protocol);
     (void)k_mutex_unlock(&runtime_macro_protocol_dynamic_timeout_mutex);
     runtime_macro_protocol_set_error(
@@ -550,8 +559,8 @@ static int runtime_macro_protocol_process_dynamic_data(
     return 0;
   }
 
-  int err = zmk_runtime_macro_dynamic_append(
-      offset, request + ZMK_RUNTIME_MACRO_PROTOCOL_PAYLOAD_OFFSET,
+  int err = zmk_runtime_macro_dynamic_append_slot(
+      slot, offset, request + ZMK_RUNTIME_MACRO_PROTOCOL_PAYLOAD_OFFSET,
       payload_length);
   if (err != 0) {
     runtime_macro_protocol_clear_dynamic_locked(protocol);
@@ -572,6 +581,7 @@ static int runtime_macro_protocol_process_dynamic_data(
           &runtime_macro_protocol_dynamic_timeout_work);
     }
     protocol->dynamic_active = false;
+    protocol->dynamic_slot = 0U;
     protocol->dynamic_request_id = 0U;
     protocol->dynamic_total_length = 0U;
     protocol->dynamic_received_length = 0U;
@@ -597,8 +607,8 @@ static int runtime_macro_protocol_process_dynamic_data(
 static int runtime_macro_protocol_process_dynamic_clear(
     struct zmk_runtime_macro_protocol *protocol, const uint8_t *request,
     uint8_t *response) {
-  if (request[ZMK_RUNTIME_MACRO_PROTOCOL_SLOT_OFFSET] !=
-      ZMK_RUNTIME_MACRO_PROTOCOL_DYNAMIC_SLOT) {
+  const uint8_t slot = request[ZMK_RUNTIME_MACRO_PROTOCOL_SLOT_OFFSET];
+  if (!runtime_macro_protocol_dynamic_slot_is_valid(slot)) {
     runtime_macro_protocol_set_error(
         response, ZMK_RUNTIME_MACRO_PROTOCOL_STATUS_BAD_SLOT);
     return 0;
@@ -612,16 +622,19 @@ static int runtime_macro_protocol_process_dynamic_clear(
 
   (void)k_mutex_lock(&runtime_macro_protocol_dynamic_timeout_mutex,
                      K_FOREVER);
-  zmk_runtime_macro_dynamic_clear();
-  if (runtime_macro_protocol_dynamic_timeout_owner == protocol) {
-    runtime_macro_protocol_dynamic_timeout_owner = NULL;
-    (void)k_work_cancel_delayable(&runtime_macro_protocol_dynamic_timeout_work);
+  zmk_runtime_macro_dynamic_clear_slot(slot);
+  if (protocol->dynamic_active && protocol->dynamic_slot == slot) {
+    if (runtime_macro_protocol_dynamic_timeout_owner == protocol) {
+      runtime_macro_protocol_dynamic_timeout_owner = NULL;
+      (void)k_work_cancel_delayable(&runtime_macro_protocol_dynamic_timeout_work);
+    }
+    protocol->dynamic_active = false;
+    protocol->dynamic_slot = 0U;
+    protocol->dynamic_request_id = 0U;
+    protocol->dynamic_total_length = 0U;
+    protocol->dynamic_received_length = 0U;
+    protocol->dynamic_deadline_ms = 0;
   }
-  protocol->dynamic_active = false;
-  protocol->dynamic_request_id = 0U;
-  protocol->dynamic_total_length = 0U;
-  protocol->dynamic_received_length = 0U;
-  protocol->dynamic_deadline_ms = 0;
   (void)k_mutex_unlock(&runtime_macro_protocol_dynamic_timeout_mutex);
 
   runtime_macro_protocol_set_success(response, 0U, 0U);

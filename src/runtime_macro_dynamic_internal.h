@@ -19,10 +19,8 @@
 #define ZMK_RUNTIME_MACRO_DYNAMIC_SLOT_MAX_TEXT_LEN 512U
 
 /*
- * Legacy single-object bound of the frozen v1 dynamic wire contract. The v1
- * protocol opcodes, DYNAMIC_PROTOCOL.md, and the legacy single-object entry
- * points all still address one 256-byte object on the legacy slot until D3
- * migrates the wire to per-slot addressing. The multi-slot store and the
+ * Legacy single-object bound retained only by the internal compatibility
+ * entry points used by host/lifecycle tests. The dynamic v2 wire and the
  * parameterized behavior use ZMK_RUNTIME_MACRO_DYNAMIC_SLOT_MAX_TEXT_LEN.
  */
 #define ZMK_RUNTIME_MACRO_DYNAMIC_MAX_TEXT_LEN 256U
@@ -36,10 +34,9 @@
     CONFIG_ZMK_RUNTIME_MACRO_DYNAMIC_SLOT_COUNT
 
 /*
- * Slot used by the legacy single-object entry points. The frozen v1 wire
- * contract, the legacy single-object entry points, and the lifecycle clear
- * paths address this slot until D3 migrates the wire to per-slot addressing.
- * The parameterized behavior addresses explicit slots since D2.
+ * Slot used by the internal legacy single-object entry points. The dynamic
+ * v2 wire and parameterized behavior address explicit slots; lifecycle clear
+ * paths operate on all slots.
  */
 #define ZMK_RUNTIME_MACRO_DYNAMIC_LEGACY_SLOT 0U
 
@@ -170,11 +167,10 @@ void zmk_runtime_macro_dynamic_check_expiry(void);
 int zmk_runtime_macro_dynamic_execute_slot(uint8_t slot);
 
 /*
- * Legacy single-object entry points. They act on
- * ZMK_RUNTIME_MACRO_DYNAMIC_LEGACY_SLOT and keep the frozen 256-byte bound of
- * the v1 wire contract. They remain the entry points used by the protocol and
- * USB/lifecycle code until D3 migrates the wire to explicit slots; the keymap
- * behavior addresses explicit slots since D2.
+ * Internal legacy single-object entry points. They act on
+ * ZMK_RUNTIME_MACRO_DYNAMIC_LEGACY_SLOT and keep the 256-byte bound for
+ * compatibility with existing host/lifecycle tests. The dynamic v2 wire and
+ * keymap behavior use the explicit slot-aware entry points.
  */
 int zmk_runtime_macro_dynamic_begin(size_t total_length, uint32_t ttl_seconds);
 int zmk_runtime_macro_dynamic_begin_with_options(size_t total_length,
@@ -186,7 +182,6 @@ int zmk_runtime_macro_dynamic_execute(void);
 
 /*
  * Clear the whole dynamic state (every slot, staging, and all TTL deadlines).
- * This matches the v1 whole-state clear semantics of the frozen wire contract
- * and of the USB/profile/endpoint lifecycle policies.
+ * This is reserved for lifecycle reset paths; DYNAMIC_CLEAR is now per-slot.
  */
 void zmk_runtime_macro_dynamic_clear(void);
