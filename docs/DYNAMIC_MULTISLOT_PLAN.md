@@ -1,14 +1,15 @@
 # RAM-only Dynamic Macro 多槽位扩展设计（D0）
 
-> **状态：D0、D1、D2、D3、D4 已实现并完成 host/container 验证；D5 client 同步、
-> D6 集成与实物验证尚未完成。**
+> **状态：D0、D1、D2、D3、D4 已实现并完成 host/container 验证；D5 的 Python CLI 子
+> 范围已实现（见第 17 节）；桌面端由用户单独处理，不在本仓库实现；D6 集成与实物验证
+> 尚未完成。**
 >
 > 多槽 store、512-byte executor、参数化 behavior、v2 dynamic wire 和多槽 lifecycle
 > clear 已经落地。
 > [`DYNAMIC_PROTOCOL.md`](DYNAMIC_PROTOCOL.md) 现在描述实际 v2 contract：
 > `CAPABILITIES (0x23)` 返回 capability v2、配置槽数和最大 `512` bytes；dynamic
-> opcode 只接受有效 `0..N-1` slot，`0xff` 返回 `BAD_SLOT`。Python/CLI 和桌面 client
-> 尚未同步到该破坏式 contract。
+> opcode 只接受有效 `0..N-1` slot，`0xff` 返回 `BAD_SLOT`。Python CLI 已按该 v2
+> contract 实现；桌面 client 未在本仓库同步，不能把当前桌面版本当作 v2 client。
 >
 > 本文确认的决策属于**破坏式升级**：不保留旧客户端、旧固件或旧 keymap 兼容。
 
@@ -19,8 +20,8 @@
   多槽位 backlog 在其 18.1、18.2；
 - [`DYNAMIC_PROTOCOL.md`](DYNAMIC_PROTOCOL.md)：**当前已交付固件**的 dynamic v2
   wire contract；D5 client 必须据此同步；
-- [`DYNAMIC_DESKTOP_APP_SPEC.md`](DYNAMIC_DESKTOP_APP_SPEC.md)：桌面应用实施规范，
-  需在 D5 同步；
+- [`DYNAMIC_DESKTOP_APP_SPEC.md`](DYNAMIC_DESKTOP_APP_SPEC.md)：桌面应用实施规范；
+  桌面端由用户单独处理，本仓库不实现，也不在本轮修改该规范；
 - 本文：多槽位扩展的目标设计、阶段划分和验收矩阵。
 
 若本文与实现文档冲突，以 `DYNAMIC_PROTOCOL.md` 的实际 v2 wire contract 和本记录的
@@ -92,7 +93,7 @@
 | `src/runtime_macro_executor.c` `RUNTIME_MACRO_EXECUTOR_MAX_TEXT_LEN` | dynamic 下 `256` | `512` | D2 已完成 |
 | `dts/bindings/behaviors/zmk,behavior-runtime-macro-dynamic.yaml` | `zero_param.yaml` | 单 cell binding | D2 已完成 |
 | `Kconfig` | 无槽位选项 | 新增 `ZMK_RUNTIME_MACRO_DYNAMIC_SLOT_COUNT` | D1 已完成 |
-| `tools/runtime_macro_cli.py` dynamic 常量 | version `1`、count `1`、max `256` | version `2`、count 配置值、max `512` | 待 D5 |
+| `tools/runtime_macro_cli.py` dynamic 常量 | version `1`、count `1`、max `256` | version `2`、count `1..8`、max `512` | D5 CLI 已完成 |
 
 不变：`DYNAMIC_BEGIN` flags 定义、TTL 边界 `300/1/86400`、transaction timeout `30s`、
 三个 lifecycle policy Kconfig 名称与默认值、behavior compatible 和 guard。
@@ -319,7 +320,9 @@ executor snapshot `+256 B`，合计 `+4464 B`；最新 dongle dynamic-on 构建�
 - 无 `get_dynamic()` 或任何 readback API；dynamic 操作不自动登录、不改变 static
   auth 状态机。
 
-### 8.2 桌面应用
+以下 8.1 的 CLI 部分已于 D5 实现（见第 17 节）；本仓库不实现 8.2 桌面端。
+
+### 8.2 桌面应用（由用户单独处理）
 
 - 增加槽位选择（`0..object_count-1`），上传/清除都带槽位；
 - “清空全部”实现为逐槽 CLEAR 循环，并显示部分失败；
@@ -372,7 +375,7 @@ executor snapshot `+256 B`，合计 `+4464 B`；最新 dongle dynamic-on 构建�
 | D2 | Executor 与 behavior（已完成） | 512-byte snapshot、参数化 behavior、keymap/wrapper 迁移说明 | 单 executor/全局 busy；现有静态测试无回归 |
 | D3 | Protocol 与 capability v2（已完成） | `0x23` v2、per-slot BEGIN/DATA/CLEAR、`0xff` → `BAD_SLOT`；改写 `DYNAMIC_PROTOCOL.md` | wire 表与 header 常量一致；512-byte/slot isolation/逐槽 clear 测试通过 |
 | D4 | Lifecycle 多槽 clear（已完成） | `clear_all` 接入 USB/BLE/endpoint policy | policy on/off；多槽 positive/boundary 测试；不误清 static/auth |
-| D5 | Python/CLI 与桌面规范 | 破坏式 API、`--slot`/`--all`、桌面规范同步 | Python 测试/Ruff；无 readback |
+| D5 | Python/CLI 与桌面规范 | CLI：破坏式 API、`--slot`/`--all`（已完成）；桌面端：用户单独处理 | CLI：Python 测试/Ruff；无 readback（已通过） |
 | D6 | 集成与文档回归 | 完整回归、实物脚本、README/PLAN/桌面文档、最终 RAM/Flash 记录 | 自动化矩阵通过；实物验证按用户安排（当前暂缓） |
 
 每个阶段继续遵守项目流程：用户确认开始 → 只实现该阶段范围 → 测试与审查 →
@@ -383,11 +386,12 @@ executor snapshot `+256 B`，合计 `+4464 B`；最新 dongle dynamic-on 构建�
 
 - **RAM**：预期约 +4.5 KB，D1 必须实测；executor snapshot 和 store 都不得放在栈或
   workqueue 小栈路径上；
-- **wire 破坏性**：`DYNAMIC_PROTOCOL.md`、Python client、桌面应用测试在新的契约下
-  需要同步改写；过渡期间文档必须明确“已交付 v1 / 目标 v2”的区别；
+- **wire 破坏性**：`DYNAMIC_PROTOCOL.md` 已完成 v2 改写，Python CLI 已按 v2 实现；
+  桌面应用的对接与测试由用户单独处理，在其完成前不得声称桌面端已支持多槽位；
 - **keymap 迁移**：`leen_totem_dongle.keymap` 的零参数引用和配置仓库需要同步；本阶段
   不修改配置仓库；
 - **桌面状态表达**：无 readback 决定了 UI 只能显示本地观察状态，需要产品确认文案；
+  该工作属用户侧的桌面实现范围，本仓库只提供 wire 契约；
 - **实物验证**：用户已暂缓，D6 完成标准和 Phase 8 的实物项在验证前不得标记完成；
 - **上传级 lifecycle**：仍为 backlog，多槽位实现不得顺带引入。
 
@@ -737,3 +741,78 @@ policy on/off 由同一 fixture 编译两次（`runtime_macro_usb_hid_test`、
 - `docs/DYNAMIC_MULTISLOT_PLAN.md`、`docs/DYNAMIC_MACRO_PLAN.md`
 
 D4 改动尚未提交；D2/D3 提交仍按用户要求暂不推送。
+
+## 17. D5 实施记录（CLI 子范围）
+
+### 17.1 范围与边界
+
+本轮只实现 D5 的 Python CLI/客户端子范围。用户明确将**桌面端单独处理**，因此：
+
+- 未修改桌面应用仓库；
+- 未修改 [`DYNAMIC_DESKTOP_APP_SPEC.md`](DYNAMIC_DESKTOP_APP_SPEC.md)；桌面规范仍描述
+  旧行为，必须在用户自行实现桌面端时按 `DYNAMIC_PROTOCOL.md` 的 v2 contract 同步；
+- 未修改固件 wire、protocol 实现、opcode、DTS/binding 或配置仓库。
+
+### 17.2 已实现内容（`tools/runtime_macro_cli.py`）
+
+- capability v2：`DYNAMIC_CAPABILITY_VERSION = 2`，`CAPABILITIES` 请求固定携带 slot `0`，
+  校验 `capability_version == 2`、`dynamic_object_count` 在 `1..8`、
+  `max_dynamic_length == 512`，以及原有 TTL/timeout/lifecycle flags 规则；
+- 拒绝 v1/畸形 capability：固件返回 `capability_version = 1` 或对 v2 capability slot 返回
+  `BAD_SLOT` 时抛出 `DynamicV1Error`（`ProtocolError` 子类，不重试、不降级）；其他未知版本、
+  越界对象数、错误最大长度均报 malformed capability，且不发送任何 dynamic 写入；
+- 破坏式 slot API：`upload_dynamic(slot, data, ttl_seconds=None, *, keep_after_execute=False)`、
+  `clear_dynamic(slot)`；`validate_dynamic_slot()` 在任何 HID write 前拒绝 `0..7` 之外的
+  slot（含 `0xff`），capability 发现后再拒绝 `>= dynamic_object_count` 的 slot；
+- `DYNAMIC_BEGIN`/`DYNAMIC_DATA`/`DYNAMIC_CLEAR` 均携带目标 slot；`0xff` dynamic sentinel 已
+  完全移除（`LIST_SLOT` 仅用于 static `LIST` 和 auth 命令）；
+- 每槽 1..512 bytes、22-byte chunking（512 bytes = 23×22 + 6）、默认/显式 TTL、
+  `KEEP_AFTER_EXECUTE` flags 与原有重试规则（`BAD_REQUEST`/`BAD_OFFSET`/传输错误使用新的
+  request ID 从 BEGIN 重启）保持一致；
+- `clear_all_dynamic()`：按 capability 报告的 `dynamic_object_count` 对 `0..N-1` 逐槽发送
+  `DYNAMIC_CLEAR`（wire 无 clear-all opcode），每槽独立重试并独立记录结果；任一槽位失败时
+  仍尝试其余槽位，然后抛出 `DynamicClearAllError`（`.failed_slots` 列出失败槽位），绝不把部分
+  失败报告为成功；
+- 无 `get_dynamic()`/readback API，也没有任何通过 static `list`/`get` 推断 dynamic 内容的路径。
+
+### 17.3 CLI 命令
+
+- `capabilities`：输出 v2 字段（version、`dynamic_object_count`、flags、max length、TTL 边界、
+  transaction timeout）；
+- `dynamic-set --slot N`：`--slot` 必填，三种输入方式互斥，输出目标槽位、字节数、TTL 和执行后策略；
+- `dynamic-clear --slot N` 与 `dynamic-clear --all`：互斥且必选其一；`--all` 输出已清槽位列表，
+  部分失败时向 stderr 报告失败槽位并返回退出码 `1`；
+- 本地参数/文本/slot 校验全部发生在任何 HID write 之前（slot 硬边界甚至在打开设备前）。
+
+### 17.4 测试记录
+
+`tests/python/test_runtime_macro_cli.py`（70 tests，全部通过）：
+
+- capability v2：请求字节（slot `0` + 22-byte payload）、`object_count` 取 `1/3/8` 均接受；
+  拒绝 v1、未知 version、`object_count` `0`/`9`、`max_length=511`、reserved lifecycle flags、
+  `BAD_OPCODE` 和 `BAD_SLOT`（v1）；
+- slot：`upload_dynamic`/`clear_dynamic` 对 `-1`/`8`/`12`/`0xff` 在零 HID write 下拒绝；
+  slot `>= dynamic_object_count` 在 capability 之后、BEGIN/CLEAR 之前拒绝；BEGIN/DATA/CLEAR
+  帧均带正确 slot；
+- 分块：`1/22/23/256/511/512`，512 bytes 为 `[22]×23 + [6]`；同一上传 BEGIN/DATA 共用同一
+  request ID；默认 TTL、显式 TTL、keep flags 与原有断言保持；
+- clear-all：按 `0..2` 升序逐槽 CLEAR、每槽独立 request ID；slot 1 失败时仍尝试 slot 0/2/3
+  并报 `failed_slots=(1,)`；逐槽超时重试使用新的 request ID；
+- CLI：`--slot`/`--all` 必填与互斥、`dynamic-set` 输出目标槽位、`--all` 成功与部分失败退出码、
+  单槽 clear、以及所有无效输入（TTL、非 ASCII、513 bytes、slot `8`/`-1`）零 HID write。
+
+容器内同时运行：`python3 -m py_compile`、`ruff check tools tests/python`（均通过）。本轮未修改
+固件源码，因此不重跑 host suite 与固件构建。
+
+### 17.5 变更文件
+
+- `tools/runtime_macro_cli.py`
+- `tests/python/test_runtime_macro_cli.py`
+- `docs/CLI.md`
+- `docs/DYNAMIC_MULTISLOT_PLAN.md`、`docs/DYNAMIC_MACRO_PLAN.md`
+
+### 17.6 未完成 / 交接
+
+- 桌面端（含 `DYNAMIC_DESKTOP_APP_SPEC.md` 同步、槽位 UI、逐槽清空与部分失败展示）由用户
+  单独处理；
+- D6 集成回归、完整构建矩阵与最终 RAM/Flash 记录仍待执行；实物验证仍按用户安排暂缓。

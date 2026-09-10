@@ -23,6 +23,8 @@ FRAME_SIZE = 32
 HEADER_SIZE = 10
 PAYLOAD_SIZE = 22
 VERSION = 2
+# Static LIST and the auth commands use 0xff as their slot value. Dynamic
+# commands never do: they carry an explicit 0..object_count-1 slot.
 LIST_SLOT = 0xFF
 
 # Authentication values mirror include/zmk/runtime_macro_auth.h and
@@ -93,9 +95,17 @@ STATUS_RATE_LIMITED = 13
 STATUS_AUTH_NO_CHALLENGE = 14
 STATUS_CREDENTIAL_INVALID = 15
 
-DYNAMIC_CAPABILITY_VERSION = 1
-DYNAMIC_OBJECT_COUNT = 1
-DYNAMIC_MAX_LENGTH = 256
+# Dynamic macro capability v2 (multislot). The frozen wire contract is
+# docs/DYNAMIC_PROTOCOL.md: CAPABILITIES reports the configured slot count, a
+# dynamic command carries an explicit 0..count-1 slot, and there is no 0xff
+# dynamic sentinel, no readback, and no clear-all opcode.
+DYNAMIC_CAPABILITY_VERSION = 2
+DYNAMIC_CAPABILITY_VERSION_V1 = 1
+DYNAMIC_OBJECT_COUNT_MIN = 1
+DYNAMIC_OBJECT_COUNT_MAX = 8
+DYNAMIC_CAPABILITY_SLOT = 0
+DYNAMIC_MAX_LENGTH = 512
+DYNAMIC_MAX_LENGTH_V1 = 256
 DYNAMIC_DEFAULT_TTL_SECONDS = 300
 DYNAMIC_MIN_TTL_SECONDS = 1
 DYNAMIC_MAX_TTL_SECONDS = 86400
@@ -180,6 +190,30 @@ class DynamicUnsupportedError(RemoteError):
         self.args = ("固件不支持 dynamic macro capability，请升级固件后再试；客户端不会降级为 static SET",)
 
 
+class DynamicV1Error(ProtocolError):
+    """The firmware still exposes the single-object dynamic capability (v1)."""
+
+    def __init__(self):
+        super().__init__(
+            "固件仍使用单槽位 dynamic capability（v1）：只接受 0xff slot 且最大 "
+            f"{DYNAMIC_MAX_LENGTH_V1} bytes；客户端要求 v2（多槽位、"
+            f"{DYNAMIC_MAX_LENGTH} bytes），请升级固件后再试；"
+            "不会降级为 v1 或 static SET"
+        )
+
+
+class DynamicClearAllError(RuntimeMacroError):
+    """At least one per-slot CLEAR failed during a clear-all request."""
+
+    def __init__(self, failures: Iterable[tuple[int, Exception]]):
+        self.failures = tuple((slot, error) for slot, error in failures)
+        self.failed_slots = tuple(slot for slot, _ in self.failures)
+        detail = ", ".join(
+            f"slot {slot} ({error})" for slot, error in self.failures
+        )
+        super().__init__(f"dynamic clear-all is not atomic; failed slot(s): {detail}")
+
+
 class PasswordSetUnconfirmed(ProtocolError):
     """The final PASSWORD_SET result could not be confirmed by its salt."""
 
@@ -221,6 +255,21 @@ def build_frame(
     put_u16(frame, TOTAL_LENGTH_OFFSET, total_length)
     frame[PAYLOAD_OFFSET : PAYLOAD_OFFSET + len(payload)] = payload
     return bytes(frame)
+
+
+def validate_dynamic_slot(slot: int) -> int:
+    """Validate a dynamic slot against the multislot hard bound.
+
+    This never sends a HID request: a slot outside 0..7 cannot be valid on any
+    current firmware, so callers reject it before touching the device. The
+    per-device ``0..dynamic_object_count-1`` check happens after capability
+    discovery.
+    """
+    if not isinstance(slot, int) or not 0 <= slot < DYNAMIC_OBJECT_COUNT_MAX:
+        raise ValueError(
+            f"dynamic slot must be between 0 and {DYNAMIC_OBJECT_COUNT_MAX - 1}"
+        )
+    return slot
 
 
 def validate_ascii(data: bytes) -> None:
@@ -624,14 +673,19 @@ class RuntimeMacroClient:
             raise ProtocolError(f"{operation} acknowledgement total length is incorrect")
 
     def _dynamic_capabilities_once(self) -> DynamicCapabilities:
+        # v2 firmware requires a valid dynamic slot on CAPABILITIES; slot zero
+        # is always valid while object_count is at least one. Firmware that
+        # only knows the v1 sentinel rejects it with BAD_SLOT.
         request = build_frame(
-            OPCODE_CAPABILITIES, self._request_id(), LIST_SLOT
+            OPCODE_CAPABILITIES, self._request_id(), DYNAMIC_CAPABILITY_SLOT
         )
         try:
             response = self._call(request)
         except RemoteError as exc:
             if exc.status == STATUS_BAD_OPCODE:
                 raise DynamicUnsupportedError() from exc
+            if exc.status == STATUS_BAD_SLOT:
+                raise DynamicV1Error() from exc
             raise
 
         payload_length = response[PAYLOAD_LENGTH_OFFSET]
@@ -655,9 +709,22 @@ class RuntimeMacroClient:
             "transaction_timeout_seconds": int.from_bytes(payload[18:22], "little"),
         }
         if values["capability_version"] != DYNAMIC_CAPABILITY_VERSION:
-            raise ProtocolError("CAPABILITIES response has an unknown capability version")
-        if values["dynamic_object_count"] != DYNAMIC_OBJECT_COUNT:
-            raise ProtocolError("CAPABILITIES response has an invalid object count")
+            if values["capability_version"] == DYNAMIC_CAPABILITY_VERSION_V1:
+                raise DynamicV1Error()
+            raise ProtocolError(
+                "CAPABILITIES response has an unknown capability version "
+                f"{values['capability_version']}; the client requires "
+                f"{DYNAMIC_CAPABILITY_VERSION}"
+            )
+        if not (
+            DYNAMIC_OBJECT_COUNT_MIN
+            <= values["dynamic_object_count"]
+            <= DYNAMIC_OBJECT_COUNT_MAX
+        ):
+            raise ProtocolError(
+                "CAPABILITIES response has an invalid object count: "
+                f"{values['dynamic_object_count']}"
+            )
         if lifecycle_flags & ~DYNAMIC_LIFECYCLE_KNOWN_MASK:
             raise ProtocolError("CAPABILITIES response contains reserved lifecycle flags")
         if lifecycle_flags & DYNAMIC_LIFECYCLE_REQUIRED_MASK != DYNAMIC_LIFECYCLE_REQUIRED_MASK:
@@ -698,6 +765,7 @@ class RuntimeMacroClient:
 
     def _upload_dynamic_once(
         self,
+        slot: int,
         data: bytes,
         ttl_seconds: int | None,
         keep_after_execute: bool,
@@ -715,7 +783,7 @@ class RuntimeMacroClient:
         begin = build_frame(
             OPCODE_DYNAMIC_BEGIN,
             request_id,
-            LIST_SLOT,
+            slot,
             payload=ttl_payload,
             offset=0,
             total_length=len(data),
@@ -728,7 +796,7 @@ class RuntimeMacroClient:
             request = build_frame(
                 OPCODE_DYNAMIC_DATA,
                 request_id,
-                LIST_SLOT,
+                slot,
                 payload=chunk,
                 offset=offset,
                 total_length=len(data),
@@ -740,14 +808,21 @@ class RuntimeMacroClient:
 
     def upload_dynamic(
         self,
+        slot: int,
         data: bytes,
         ttl_seconds: int | None = None,
         *,
         keep_after_execute: bool = False,
     ) -> None:
-        """Upload dynamic text atomically without exposing a readback API."""
+        """Upload dynamic text to one slot without exposing a readback API."""
+        slot = validate_dynamic_slot(slot)
         data = self._validate_dynamic_input(data, ttl_seconds)
         capabilities = self.get_capabilities()
+        if slot >= capabilities.dynamic_object_count:
+            raise ValueError(
+                f"dynamic slot {slot} is outside the firmware range "
+                f"0..{capabilities.dynamic_object_count - 1}"
+            )
         if len(data) > capabilities.max_dynamic_length:
             raise ValueError(
                 f"dynamic text exceeds firmware limit of {capabilities.max_dynamic_length} bytes"
@@ -771,7 +846,7 @@ class RuntimeMacroClient:
             request_id = self._request_id()
             try:
                 self._upload_dynamic_once(
-                    data, ttl_seconds, keep_after_execute, request_id
+                    slot, data, ttl_seconds, keep_after_execute, request_id
                 )
                 return
             except (TimeoutError, TransportError) as exc:
@@ -787,17 +862,47 @@ class RuntimeMacroClient:
                 raise last
         raise AssertionError("unreachable")
 
-    def _clear_dynamic_once(self) -> None:
+    def _clear_dynamic_once(self, slot: int) -> None:
         request = build_frame(
-            OPCODE_DYNAMIC_CLEAR, self._request_id(), LIST_SLOT
+            OPCODE_DYNAMIC_CLEAR, self._request_id(), slot
         )
         response = self._call(request)
         self._validate_empty_ack(response, "DYNAMIC_CLEAR")
 
-    def clear_dynamic(self) -> None:
-        """Clear dynamic text after capability discovery; the operation is idempotent."""
-        self.get_capabilities()
-        self._retry_call(self._clear_dynamic_once)
+    def clear_dynamic(self, slot: int) -> None:
+        """Clear one slot after capability discovery; the operation is idempotent."""
+        slot = validate_dynamic_slot(slot)
+        capabilities = self.get_capabilities()
+        if slot >= capabilities.dynamic_object_count:
+            raise ValueError(
+                f"dynamic slot {slot} is outside the firmware range "
+                f"0..{capabilities.dynamic_object_count - 1}"
+            )
+        self._retry_call(lambda: self._clear_dynamic_once(slot))
+
+    def clear_all_dynamic(self) -> tuple[int, ...]:
+        """Clear every slot with one CLEAR per slot.
+
+        The wire contract has no clear-all opcode, so this is a client-side
+        loop over ``0..dynamic_object_count-1`` taken from capability
+        discovery. Every slot is attempted even after a failure, and any
+        failure raises :class:`DynamicClearAllError` listing the failed slots:
+        a partial clear is never reported as success. Returns the cleared slots
+        on complete success.
+        """
+        capabilities = self.get_capabilities()
+        failures: list[tuple[int, Exception]] = []
+        cleared: list[int] = []
+        for slot in range(capabilities.dynamic_object_count):
+            try:
+                self._retry_call(lambda slot=slot: self._clear_dynamic_once(slot))
+            except (RuntimeMacroError, OSError) as exc:
+                failures.append((slot, exc))
+            else:
+                cleared.append(slot)
+        if failures:
+            raise DynamicClearAllError(failures)
+        return tuple(cleared)
 
     def _auth_info_once(self) -> AuthInfo:
         request = build_frame(OPCODE_AUTH_INFO, self._request_id(), LIST_SLOT)
@@ -1174,7 +1279,15 @@ def make_parser() -> argparse.ArgumentParser:
     sub.add_parser("set-password", help="set or replace the management password")
     sub.add_parser("lock", help="close the current management session")
     sub.add_parser("capabilities", help="show dynamic macro capabilities")
-    dynamic_set = sub.add_parser("dynamic-set", help="upload a temporary dynamic macro")
+    dynamic_set = sub.add_parser(
+        "dynamic-set", help="upload a temporary dynamic macro to one slot"
+    )
+    dynamic_set.add_argument(
+        "--slot",
+        type=int,
+        required=True,
+        help=f"target dynamic slot (0..{DYNAMIC_OBJECT_COUNT_MAX - 1})",
+    )
     dynamic_inputs = dynamic_set.add_mutually_exclusive_group(required=True)
     dynamic_inputs.add_argument("--text")
     dynamic_inputs.add_argument("--file", type=Path)
@@ -1185,7 +1298,21 @@ def make_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="keep committed text after the executor accepts it",
     )
-    sub.add_parser("dynamic-clear", help="clear the temporary dynamic macro")
+    dynamic_clear = sub.add_parser(
+        "dynamic-clear", help="clear one temporary dynamic macro slot or all slots"
+    )
+    dynamic_clear_target = dynamic_clear.add_mutually_exclusive_group(required=True)
+    dynamic_clear_target.add_argument(
+        "--slot",
+        type=int,
+        help=f"dynamic slot to clear (0..{DYNAMIC_OBJECT_COUNT_MAX - 1})",
+    )
+    dynamic_clear_target.add_argument(
+        "--all",
+        action="store_true",
+        dest="all_slots",
+        help="clear every slot reported by capability discovery, one CLEAR per slot",
+    )
     return parser
 
 
@@ -1257,6 +1384,16 @@ def main(argv: list[str] | None = None, *, hid_module: Any = None) -> int:
         else:
             data = None
 
+        # The hard dynamic slot bound is checked before any HID traffic. The
+        # per-device 0..object_count-1 bound is checked after capability
+        # discovery inside the client.
+        dynamic_slot = None
+        wants_dynamic_slot = args.command == "dynamic-set" or (
+            args.command == "dynamic-clear" and not args.all_slots
+        )
+        if wants_dynamic_slot:
+            dynamic_slot = validate_dynamic_slot(args.slot)
+
         # Passwords are deliberately collected before opening HID. They never
         # appear in argv, environment variables, ordinary files, or logs, and
         # invalid confirmation never sends a HID request.
@@ -1320,8 +1457,9 @@ def main(argv: list[str] | None = None, *, hid_module: Any = None) -> int:
                     f"transaction_timeout={capabilities.transaction_timeout_seconds}"
                 )
             elif args.command == "dynamic-set":
-                assert data is not None
+                assert data is not None and dynamic_slot is not None
                 client.upload_dynamic(
+                    dynamic_slot,
                     data,
                     ttl_seconds=args.ttl,
                     keep_after_execute=args.keep_after_execute,
@@ -1331,12 +1469,18 @@ def main(argv: list[str] | None = None, *, hid_module: Any = None) -> int:
                 )
                 policy = "keep" if args.keep_after_execute else "consume"
                 print(
-                    f"dynamic macro uploaded ({len(data)} bytes, ttl={ttl}s, "
-                    f"after_execute={policy})"
+                    f"dynamic slot {dynamic_slot} uploaded ({len(data)} bytes, "
+                    f"ttl={ttl}s, after_execute={policy})"
                 )
             elif args.command == "dynamic-clear":
-                client.clear_dynamic()
-                print("dynamic macro cleared")
+                if args.all_slots:
+                    cleared = client.clear_all_dynamic()
+                    listed = ", ".join(str(slot) for slot in cleared)
+                    print(f"dynamic macro cleared on {len(cleared)} slot(s): {listed}")
+                else:
+                    assert dynamic_slot is not None
+                    client.clear_dynamic(dynamic_slot)
+                    print(f"dynamic slot {dynamic_slot} cleared")
         return 0
     except (RuntimeMacroError, ValueError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)

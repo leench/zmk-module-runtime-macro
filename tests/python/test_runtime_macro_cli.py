@@ -154,9 +154,15 @@ def auth_info_payload(
     return bytes([flags, cli.AUTH_KDF_ID]) + iterations.to_bytes(4, "little") + bytes(salt)
 
 
-def dynamic_capabilities_payload(*, lifecycle_flags=0x0F, max_length=256):
+def dynamic_capabilities_payload(
+    *,
+    lifecycle_flags=0x0F,
+    max_length=512,
+    object_count=8,
+    capability_version=2,
+):
     return (
-        bytes([cli.DYNAMIC_CAPABILITY_VERSION, cli.DYNAMIC_OBJECT_COUNT])
+        bytes([capability_version, object_count])
         + lifecycle_flags.to_bytes(2, "little")
         + max_length.to_bytes(2, "little")
         + cli.DYNAMIC_DEFAULT_TTL_SECONDS.to_bytes(4, "little")
@@ -1141,7 +1147,18 @@ class DynamicClientTests(unittest.TestCase):
         def reply(device, wire):
             request = wire[1:]
             expected = bytes(
-                [2, cli.OPCODE_CAPABILITIES, 0, 0, cli.LIST_SLOT, 0, 0, 0, 0, 0]
+                [
+                    2,
+                    cli.OPCODE_CAPABILITIES,
+                    0,
+                    0,
+                    cli.DYNAMIC_CAPABILITY_SLOT,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ]
             ) + bytes(22)
             self.assertEqual(expected, request)
             device.read_queue.append(
@@ -1154,12 +1171,37 @@ class DynamicClientTests(unittest.TestCase):
 
         client, device = self.make_client(reply, retries=0)
         capabilities = client.get_capabilities()
+        self.assertEqual(cli.DYNAMIC_CAPABILITY_VERSION, capabilities.capability_version)
+        self.assertEqual(8, capabilities.dynamic_object_count)
+        self.assertEqual(512, capabilities.max_dynamic_length)
         self.assertEqual(0x7F, capabilities.lifecycle_flags)
         self.assertTrue(capabilities.clear_on_usb_disconnect)
         self.assertTrue(capabilities.clear_on_ble_profile_change)
         self.assertTrue(capabilities.clear_on_selected_endpoint_change)
         self.assertTrue(capabilities.supports_keep_after_execute)
         self.assertEqual(1, len(device.writes))
+
+    def test_capabilities_accepts_configured_object_counts(self):
+        for object_count in (
+            cli.DYNAMIC_OBJECT_COUNT_MIN,
+            3,
+            cli.DYNAMIC_OBJECT_COUNT_MAX,
+        ):
+            with self.subTest(object_count=object_count):
+                def reply(device, wire, *, object_count=object_count):
+                    device.read_queue.append(
+                        response(
+                            wire[1:],
+                            payload=dynamic_capabilities_payload(
+                                object_count=object_count
+                            ),
+                            total=22,
+                        )
+                    )
+
+                client, _ = self.make_client(reply, retries=0)
+                capabilities = client.get_capabilities()
+                self.assertEqual(object_count, capabilities.dynamic_object_count)
 
     def test_capabilities_rejects_unsupported_and_malformed_responses(self):
         def unsupported(device, wire):
@@ -1169,9 +1211,23 @@ class DynamicClientTests(unittest.TestCase):
         with self.assertRaises(cli.DynamicUnsupportedError):
             client.get_capabilities()
 
+        # A v1 dynamic firmware rejects the v2 capability slot and must never
+        # be used with v1 semantics or static SET fallbacks.
+        def v1_slot(device, wire):
+            device.read_queue.append(response(wire[1:], status=cli.STATUS_BAD_SLOT))
+
+        client, device = self.make_client(v1_slot, retries=0)
+        with self.assertRaises(cli.DynamicV1Error):
+            client.get_capabilities()
+        self.assertEqual(1, len(device.writes))
+
         for payload in (
             dynamic_capabilities_payload(lifecycle_flags=0x80),
-            dynamic_capabilities_payload(max_length=255),
+            dynamic_capabilities_payload(max_length=511),
+            dynamic_capabilities_payload(capability_version=1),
+            dynamic_capabilities_payload(capability_version=3),
+            dynamic_capabilities_payload(object_count=0),
+            dynamic_capabilities_payload(object_count=9),
         ):
             with self.subTest(payload=payload):
                 def malformed(device, wire, *, payload=payload):
@@ -1187,6 +1243,8 @@ class DynamicClientTests(unittest.TestCase):
             (22, [22]),
             (23, [22, 1]),
             (256, [22] * 11 + [14]),
+            (511, [22] * 23 + [5]),
+            (512, [22] * 23 + [6]),
         ):
             with self.subTest(length=length):
                 seen = []
@@ -1219,15 +1277,170 @@ class DynamicClientTests(unittest.TestCase):
                         )
 
                 client, _ = self.make_client(reply, retries=0)
-                client.upload_dynamic(b"x" * length)
+                client.upload_dynamic(3, b"x" * length)
                 self.assertEqual(expected_chunks, [request[5] for request in seen[2:]])
                 self.assertEqual(1, len({request[2] for request in seen[1:]}))
+                self.assertEqual(
+                    [cli.DYNAMIC_CAPABILITY_SLOT] + [3] * (len(seen) - 1),
+                    [request[4] for request in seen],
+                )
                 self.assertTrue(
                     all(
                         request[10 + request[5] :] == bytes(22 - request[5])
                         for request in seen[1:]
                     )
                 )
+
+    def test_dynamic_upload_rejects_slots_outside_the_firmware_count(self):
+        # The hard bound is local and must not touch the device at all.
+        for slot in (-1, cli.DYNAMIC_OBJECT_COUNT_MAX, 0xFF, 12):
+            with self.subTest(slot=slot):
+                client, device = self.make_client(retries=0)
+                with self.assertRaises(ValueError):
+                    client.upload_dynamic(slot, b"x")
+                self.assertEqual([], device.writes)
+
+        # A slot that is valid in general but outside the configured count is
+        # rejected after capability discovery and before BEGIN/DATA.
+        seen = []
+
+        def reply(device, wire):
+            request = wire[1:]
+            seen.append(request)
+            if request[1] == cli.OPCODE_CAPABILITIES:
+                device.read_queue.append(
+                    response(
+                        request,
+                        payload=dynamic_capabilities_payload(object_count=3),
+                        total=22,
+                    )
+                )
+
+        client, _ = self.make_client(reply, retries=0)
+        with self.assertRaises(ValueError):
+            client.upload_dynamic(4, b"x")
+        self.assertEqual([cli.OPCODE_CAPABILITIES], [request[1] for request in seen])
+
+    def test_dynamic_clear_rejects_slots_outside_the_firmware_count(self):
+        for slot in (-1, cli.DYNAMIC_OBJECT_COUNT_MAX, 0xFF, 12):
+            with self.subTest(slot=slot):
+                client, device = self.make_client(retries=0)
+                with self.assertRaises(ValueError):
+                    client.clear_dynamic(slot)
+                self.assertEqual([], device.writes)
+
+        seen = []
+
+        def reply(device, wire):
+            request = wire[1:]
+            seen.append(request)
+            device.read_queue.append(
+                response(
+                    request,
+                    payload=dynamic_capabilities_payload(object_count=2),
+                    total=22,
+                )
+            )
+
+        client, _ = self.make_client(reply, retries=0)
+        with self.assertRaises(ValueError):
+            client.clear_dynamic(2)
+        self.assertEqual([cli.OPCODE_CAPABILITIES], [request[1] for request in seen])
+
+    def test_dynamic_clear_all_wire_order_and_failed_slots(self):
+        # Success: one CLEAR per discovered slot, in ascending slot order.
+        seen = []
+
+        def reply(device, wire):
+            request = wire[1:]
+            seen.append(request)
+            if request[1] == cli.OPCODE_CAPABILITIES:
+                device.read_queue.append(
+                    response(
+                        request,
+                        payload=dynamic_capabilities_payload(object_count=3),
+                        total=22,
+                    )
+                )
+            else:
+                device.read_queue.append(response(request))
+
+        client, _ = self.make_client(reply, retries=0)
+        self.assertEqual((0, 1, 2), client.clear_all_dynamic())
+        self.assertEqual(
+            [cli.OPCODE_CAPABILITIES, cli.OPCODE_DYNAMIC_CLEAR, cli.OPCODE_DYNAMIC_CLEAR, cli.OPCODE_DYNAMIC_CLEAR],
+            [request[1] for request in seen],
+        )
+        clear_requests = [
+            request for request in seen if request[1] == cli.OPCODE_DYNAMIC_CLEAR
+        ]
+        self.assertEqual([0, 1, 2], [request[4] for request in clear_requests])
+        # Every slot CLEAR is an independent request, never one shared frame.
+        self.assertEqual(
+            len(clear_requests), len({request[2] for request in clear_requests})
+        )
+
+        # Partial failure: every remaining slot is still attempted and the
+        # failure is reported instead of being hidden as an atomic clear.
+        seen = []
+
+        def flaky(device, wire):
+            request = wire[1:]
+            seen.append(request)
+            if request[1] == cli.OPCODE_CAPABILITIES:
+                device.read_queue.append(
+                    response(
+                        request,
+                        payload=dynamic_capabilities_payload(object_count=4),
+                        total=22,
+                    )
+                )
+            elif request[4] == 1:
+                device.read_queue.append(response(request, status=cli.STATUS_INTERNAL))
+            else:
+                device.read_queue.append(response(request))
+
+        client, _ = self.make_client(flaky, retries=0)
+        with self.assertRaises(cli.DynamicClearAllError) as ctx:
+            client.clear_all_dynamic()
+        self.assertEqual((1,), ctx.exception.failed_slots)
+        self.assertEqual(
+            [0, 1, 2, 3],
+            [request[4] for request in seen if request[1] == cli.OPCODE_DYNAMIC_CLEAR],
+        )
+
+        # Timeouts are retried per slot with a new request id, matching the
+        # single-slot clear behaviour.
+        seen = []
+        timed_out = []
+
+        def timeout_once(device, wire):
+            request = wire[1:]
+            seen.append(request)
+            if request[1] == cli.OPCODE_CAPABILITIES:
+                device.read_queue.append(
+                    response(
+                        request,
+                        payload=dynamic_capabilities_payload(object_count=2),
+                        total=22,
+                    )
+                )
+                return
+            if request[4] == 1 and not timed_out:
+                timed_out.append(request)
+                return
+            device.read_queue.append(response(request))
+
+        client, _ = self.make_client(timeout_once, retries=1)
+        self.assertEqual((0, 1), client.clear_all_dynamic())
+        self.assertEqual(
+            [(0, 1), (1, 2), (1, 3)],
+            [
+                (request[4], request[2])
+                for request in seen
+                if request[1] == cli.OPCODE_DYNAMIC_CLEAR
+            ],
+        )
 
     def test_dynamic_upload_keep_after_execute_wire_bytes(self):
         seen = []
@@ -1250,8 +1463,10 @@ class DynamicClientTests(unittest.TestCase):
                 device.read_queue.append(response(request, offset=1, total=1))
 
         client, _ = self.make_client(reply, retries=0)
-        client.upload_dynamic(b"Z", keep_after_execute=True)
+        client.upload_dynamic(1, b"Z", keep_after_execute=True)
         self.assertEqual(b"\x01", seen[1][10:11])
+        self.assertEqual(1, seen[1][4])
+        self.assertEqual(1, seen[2][4])
 
     def test_dynamic_upload_keep_after_execute_with_ttl_wire_bytes(self):
         seen = []
@@ -1274,8 +1489,9 @@ class DynamicClientTests(unittest.TestCase):
                 device.read_queue.append(response(request, offset=1, total=1))
 
         client, _ = self.make_client(reply, retries=0)
-        client.upload_dynamic(b"Z", ttl_seconds=600, keep_after_execute=True)
+        client.upload_dynamic(2, b"Z", ttl_seconds=600, keep_after_execute=True)
         self.assertEqual(b"X\x02\x00\x00\x01", seen[1][10:15])
+        self.assertEqual(2, seen[1][4])
 
     def test_dynamic_upload_rejects_keep_on_old_firmware_before_begin(self):
         def reply(device, wire):
@@ -1291,7 +1507,7 @@ class DynamicClientTests(unittest.TestCase):
 
         client, device = self.make_client(reply, retries=0)
         with self.assertRaises(cli.ProtocolError):
-            client.upload_dynamic(b"Z", keep_after_execute=True)
+            client.upload_dynamic(0, b"Z", keep_after_execute=True)
         self.assertEqual(1, len(device.writes))
 
     def test_dynamic_upload_explicit_ttl_wire_bytes(self):
@@ -1315,17 +1531,19 @@ class DynamicClientTests(unittest.TestCase):
                 device.read_queue.append(response(request, offset=1, total=1))
 
         client, _ = self.make_client(reply, retries=0)
-        client.upload_dynamic(b"Z", ttl_seconds=600)
+        client.upload_dynamic(5, b"Z", ttl_seconds=600)
         self.assertEqual(
             [cli.OPCODE_CAPABILITIES, cli.OPCODE_DYNAMIC_BEGIN, cli.OPCODE_DYNAMIC_DATA],
             [request[1] for request in seen],
         )
         self.assertEqual(1, len({request[2] for request in seen[1:]}))
+        self.assertEqual(5, seen[1][4])
+        self.assertEqual(5, seen[2][4])
 
     def test_dynamic_input_validation_happens_before_any_hid_write(self):
         cases = (
             (b"", None),
-            (b"x" * 257, None),
+            (b"x" * 513, None),
             (b"\x00", None),
             (b"x", 0),
             (b"x", 86401),
@@ -1334,7 +1552,7 @@ class DynamicClientTests(unittest.TestCase):
             with self.subTest(length=len(data), ttl=ttl):
                 client, device = self.make_client(retries=0)
                 with self.assertRaises(ValueError):
-                    client.upload_dynamic(data, ttl_seconds=ttl)
+                    client.upload_dynamic(0, data, ttl_seconds=ttl)
                 self.assertEqual([], device.writes)
 
     def test_dynamic_upload_timeout_restarts_from_begin_with_new_request_id(self):
@@ -1358,7 +1576,7 @@ class DynamicClientTests(unittest.TestCase):
             # The first DATA request is intentionally left unanswered.
 
         client, _ = self.make_client(reply, retries=1)
-        client.upload_dynamic(b"x")
+        client.upload_dynamic(2, b"x")
         self.assertEqual(
             [
                 (cli.OPCODE_CAPABILITIES, 0),
@@ -1368,6 +1586,10 @@ class DynamicClientTests(unittest.TestCase):
                 (cli.OPCODE_DYNAMIC_DATA, 2),
             ],
             [(request[1], request[2]) for request in seen],
+        )
+        self.assertEqual(
+            [2, 2, 2, 2],
+            [request[4] for request in seen[1:]],
         )
 
     def test_dynamic_upload_bad_offset_restarts_with_new_request_id(self):
@@ -1392,7 +1614,7 @@ class DynamicClientTests(unittest.TestCase):
                 device.read_queue.append(response(request, offset=1, total=1))
 
         client, _ = self.make_client(reply, retries=1)
-        client.upload_dynamic(b"x")
+        client.upload_dynamic(0, b"x")
         self.assertEqual(
             [
                 (cli.OPCODE_CAPABILITIES, 0),
@@ -1422,7 +1644,7 @@ class DynamicClientTests(unittest.TestCase):
                 device.read_queue.append(response(request))
 
         client, _ = self.make_client(reply, retries=1)
-        client.clear_dynamic()
+        client.clear_dynamic(6)
         self.assertEqual(
             [
                 (cli.OPCODE_CAPABILITIES, 0),
@@ -1430,6 +1652,10 @@ class DynamicClientTests(unittest.TestCase):
                 (cli.OPCODE_DYNAMIC_CLEAR, 2),
             ],
             [(request[1], request[2]) for request in seen],
+        )
+        self.assertEqual(
+            [6, 6],
+            [request[4] for request in seen[1:]],
         )
 
     def test_dynamic_upload_does_not_authenticate_protected_device(self):
@@ -1452,7 +1678,7 @@ class DynamicClientTests(unittest.TestCase):
                 device.read_queue.append(response(request, offset=1, total=1))
 
         client, _ = self.make_client(reply, retries=0)
-        client.upload_dynamic(b"x")
+        client.upload_dynamic(1, b"x")
         self.assertEqual(
             [cli.OPCODE_CAPABILITIES, cli.OPCODE_DYNAMIC_BEGIN, cli.OPCODE_DYNAMIC_DATA],
             [request[1] for request in seen],
@@ -1467,6 +1693,8 @@ class CliTests(unittest.TestCase):
         args = cli.make_parser().parse_args(
             [
                 "dynamic-set",
+                "--slot",
+                "3",
                 "--text",
                 "hello",
                 "--ttl",
@@ -1475,6 +1703,7 @@ class CliTests(unittest.TestCase):
             ]
         )
         self.assertEqual("dynamic-set", args.command)
+        self.assertEqual(3, args.slot)
         self.assertEqual("hello", args.text)
         self.assertEqual(600, args.ttl)
         self.assertTrue(args.keep_after_execute)
@@ -1482,8 +1711,134 @@ class CliTests(unittest.TestCase):
             "capabilities", cli.make_parser().parse_args(["capabilities"]).command
         )
         self.assertEqual(
-            "dynamic-clear", cli.make_parser().parse_args(["dynamic-clear"]).command
+            2,
+            cli.make_parser().parse_args(["dynamic-clear", "--slot", "2"]).slot,
         )
+        self.assertTrue(
+            cli.make_parser().parse_args(["dynamic-clear", "--all"]).all_slots
+        )
+
+    def test_cli_dynamic_slot_arguments_are_required_and_exclusive(self):
+        with self.assertRaises(SystemExit):
+            cli.make_parser().parse_args(["dynamic-set", "--text", "x"])
+        with self.assertRaises(SystemExit):
+            cli.make_parser().parse_args(["dynamic-clear"])
+        with self.assertRaises(SystemExit):
+            cli.make_parser().parse_args(
+                ["dynamic-clear", "--slot", "0", "--all"]
+            )
+
+    def test_cli_dynamic_set_reports_the_target_slot(self):
+        def reply(device, wire):
+            request = wire[1:]
+            if request[1] == cli.OPCODE_CAPABILITIES:
+                device.read_queue.append(
+                    response(
+                        request,
+                        payload=dynamic_capabilities_payload(object_count=4),
+                        total=22,
+                    )
+                )
+            elif request[1] == cli.OPCODE_DYNAMIC_BEGIN:
+                device.read_queue.append(response(request, offset=0, total=2))
+            else:
+                device.read_queue.append(response(request, offset=2, total=2))
+
+        device = FakeDevice(reply)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = cli.main(
+                ["--retries", "0", "dynamic-set", "--slot", "2", "--text", "hi"],
+                hid_module=FakeHid([record()], device),
+            )
+        self.assertEqual(0, result)
+        self.assertIn("slot 2", out.getvalue())
+        self.assertIn("2 bytes", out.getvalue())
+
+    def test_cli_dynamic_clear_all_clears_every_slot_and_reports_failures(self):
+        def reply(device, wire):
+            request = wire[1:]
+            if request[1] == cli.OPCODE_CAPABILITIES:
+                device.read_queue.append(
+                    response(
+                        request,
+                        payload=dynamic_capabilities_payload(object_count=3),
+                        total=22,
+                    )
+                )
+            else:
+                device.read_queue.append(response(request))
+
+        device = FakeDevice(reply)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = cli.main(
+                ["--retries", "0", "dynamic-clear", "--all"],
+                hid_module=FakeHid([record()], device),
+            )
+        self.assertEqual(0, result)
+        self.assertIn("3 slot(s): 0, 1, 2", out.getvalue())
+
+        def flaky(device, wire):
+            request = wire[1:]
+            if request[1] == cli.OPCODE_CAPABILITIES:
+                device.read_queue.append(
+                    response(
+                        request,
+                        payload=dynamic_capabilities_payload(object_count=3),
+                        total=22,
+                    )
+                )
+            elif request[4] == 1:
+                device.read_queue.append(
+                    response(request, status=cli.STATUS_INTERNAL)
+                )
+            else:
+                device.read_queue.append(response(request))
+
+        device = FakeDevice(flaky)
+        err = io.StringIO()
+        out = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+            result = cli.main(
+                ["--retries", "0", "dynamic-clear", "--all"],
+                hid_module=FakeHid([record()], device),
+            )
+        self.assertEqual(1, result)
+        self.assertIn("slot 1", err.getvalue())
+        self.assertEqual("", out.getvalue())
+
+    def test_cli_dynamic_clear_slot_is_single_slot(self):
+        seen = []
+
+        def reply(device, wire):
+            request = wire[1:]
+            seen.append(request)
+            if request[1] == cli.OPCODE_CAPABILITIES:
+                device.read_queue.append(
+                    response(
+                        request,
+                        payload=dynamic_capabilities_payload(),
+                        total=22,
+                    )
+                )
+            else:
+                device.read_queue.append(response(request))
+
+        device = FakeDevice(reply)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = cli.main(
+                ["--retries", "0", "dynamic-clear", "--slot", "5"],
+                hid_module=FakeHid([record()], device),
+            )
+        self.assertEqual(0, result)
+        self.assertEqual(
+            [cli.OPCODE_CAPABILITIES, cli.OPCODE_DYNAMIC_CLEAR],
+            [request[1] for request in seen],
+        )
+        self.assertEqual(5, seen[1][4])
+        self.assertIn("slot 5", out.getvalue())
 
     def test_cli_parses_decimal_and_hex_vid_pid(self):
         args = cli.make_parser().parse_args(
@@ -1523,8 +1878,13 @@ class CliTests(unittest.TestCase):
 
     def test_cli_dynamic_invalid_input_sends_no_hid_write(self):
         for argv in (
-            ["dynamic-set", "--text", "x", "--ttl", "0"],
-            ["dynamic-set", "--text", "bad\x00"],
+            ["dynamic-set", "--slot", "0", "--text", "x", "--ttl", "0"],
+            ["dynamic-set", "--slot", "0", "--text", "bad\x00"],
+            ["dynamic-set", "--slot", "0", "--text", "x" * 513],
+            ["dynamic-set", "--slot", "8", "--text", "x"],
+            ["dynamic-set", "--slot", "-1", "--text", "x"],
+            ["dynamic-clear", "--slot", "8"],
+            ["dynamic-clear", "--slot", "-1"],
         ):
             with self.subTest(argv=argv):
                 device = FakeDevice()

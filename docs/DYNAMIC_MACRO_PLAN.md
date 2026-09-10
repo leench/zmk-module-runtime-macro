@@ -1238,7 +1238,7 @@ Phase 8 收尾；`RAM/Flash 最终数据已记录` 一项保持未勾选，13.5 
 
 多槽位目标设计已在 [`DYNAMIC_MULTISLOT_PLAN.md`](DYNAMIC_MULTISLOT_PLAN.md) 中冻结
 （D0 设计冻结；D1 多槽 store、D2 512-byte executor/参数化 behavior、D3 v2 wire、
-D4 多槽 lifecycle clear 已实现，见该文档第 13–16 节）。已确认的关键决策：
+D4 多槽 lifecycle clear、D5 Python CLI 已实现，见该文档第 13–17 节）。已确认的关键决策：
 
 - 破坏式升级：直接修改现有 `CAPABILITIES (0x23)`，不保留旧客户端/旧固件兼容；
 - dynamic opcode 的 `slot` 只接受 `0..7`，`0xff` 返回 `BAD_SLOT`；
@@ -1251,5 +1251,8 @@ firmware 的 **wire 和 lifecycle 行为**已升级为 8 槽、最大 512 bytes�
 多槽 store，D2 已落地 512-byte executor、参数化 `&runtime_macro_dynamic <slot>`
 behavior 和 Totem keymap 迁移，D3 已落地 capability v2 与逐槽 dynamic protocol，
 D4 已确认 boot/USB disconnect/BLE profile/endpoint 四条 lifecycle 路径都按全量清除
-处理所有槽位（多槽 positive/boundary host 测试已补强）。Python/CLI 和桌面 client
-仍需 D5 同步、验证和提交；实物验证仍未完成。
+处理所有槽位（多槽 positive/boundary host 测试已补强），D5 已把 Python CLI/客户端
+升级为 v2（capability v2 校验、`--slot`、`dynamic-clear --all` 逐槽清除与部分失败报告，
+无 readback）。**桌面端由用户单独处理**，本仓库不实现也不声称已完成；`docs/CLI.md`
+已同步到 v2，`DYNAMIC_DESKTOP_APP_SPEC.md` 未修改，需用户侧按 `DYNAMIC_PROTOCOL.md`
+sync。D6 集成回归、完整构建矩阵、最终 RAM/Flash 记录和实物验证仍未完成。

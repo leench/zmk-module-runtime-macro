@@ -21,9 +21,9 @@
   GUI/后台应用也应遵循 [`AUTHENTICATION_PROTOCOL.md`](AUTHENTICATION_PROTOCOL.md) 的凭据存储要求。
 - 认证不加密 USB 流量；密码配置保护管理操作，不保护按键触发时的键盘输出。
 - dynamic macro 的 `CAPABILITIES`、`DYNAMIC_BEGIN`、`DYNAMIC_DATA`、`DYNAMIC_CLEAR`
-  不经过 static slot 的 password gate；这些操作不会自动登录，也不会刷新已有认证窗口。dynamic
-  object 只在 RAM 中存在、没有 readback，默认成功执行一次后消费；使用 keep-after-execute
-  选项时可在 TTL 内重复执行，并受 lifecycle clear 约束。
+  不经过 static slot 的 password gate；这些操作不会自动登录，也不会刷新已有认证窗口。每个
+  dynamic slot 只在 RAM 中存在、各自有 TTL 和执行后策略、没有 readback，默认成功执行一次后
+  消费；使用 keep-after-execute 选项时可在 TTL 内重复执行，并受 lifecycle clear 约束。
 - dynamic channel 只应由客户端用于非-secret 文本。这是产品和客户端使用约束，不是固件能够验证的
   语义安全保证；不要上传密码、OTP、token、密钥或其他秘密。
 
@@ -117,32 +117,35 @@ python3 tools/runtime_macro_cli.py lock
 
 ### `capabilities`
 
-探测 dynamic macro v1 能力和 lifecycle flags：
+探测 dynamic macro v2（多槽位）能力和 lifecycle flags：
 
 ```sh
 python3 tools/runtime_macro_cli.py capabilities
 ```
 
-客户端会严格校验 capability version、对象数量、最大长度、TTL 边界、transaction timeout、保留
-flags 和 `SUPPORTS_KEEP_AFTER_EXECUTE`。固件返回 `BAD_OPCODE` 时会明确报告不支持 dynamic
-macro；不会降级为 static `set`。
+客户端会严格校验 capability version（必须为 v2）、对象数量（`1..8`）、最大长度（`512`）、TTL
+边界、transaction timeout、保留 flags 和 `SUPPORTS_KEEP_AFTER_EXECUTE`。固件返回 `BAD_OPCODE`
+时会明确报告不支持 dynamic macro；仍返回 v1 capability（`capability_version=1`）或拒绝 v2
+capability slot 的固件会明确提示需要升级；两种情况下都不会降级为 v1 或 static `set`。
 
 ### `dynamic-set`
 
-上传一个临时 dynamic macro。三种输入方式互斥，和 static `set` 一致：
+向一个指定槽位上传临时 dynamic macro。`--slot` 必填，取值范围是该固件的
+`0..dynamic_object_count-1`（最多 `0..7`）；三种输入方式互斥，和 static `set` 一致：
 
 ```sh
-python3 tools/runtime_macro_cli.py dynamic-set --text 'Hello'
-printf 'A\tB\n' | python3 tools/runtime_macro_cli.py dynamic-set --stdin
-python3 tools/runtime_macro_cli.py dynamic-set --file dynamic.txt --ttl 600
-python3 tools/runtime_macro_cli.py dynamic-set --text 'Repeatable' --keep-after-execute
+python3 tools/runtime_macro_cli.py dynamic-set --slot 0 --text 'Hello'
+printf 'A\tB\n' | python3 tools/runtime_macro_cli.py dynamic-set --slot 1 --stdin
+python3 tools/runtime_macro_cli.py dynamic-set --slot 2 --file dynamic.txt --ttl 600
+python3 tools/runtime_macro_cli.py dynamic-set --slot 3 --text 'Repeatable' --keep-after-execute
 ```
 
-默认情况下，dynamic macro 被 executor 接受后消费，按第二次不会再输出。使用
-`--keep-after-execute` 可在执行后保留 committed text；该选项要求 capabilities 的
-`SUPPORTS_KEEP_AFTER_EXECUTE` bit，仍受 TTL、`dynamic-clear`、USB disconnect、可选 lifecycle
-clear 和新的上传影响。客户端在任何 HID write 前检查 1..256 bytes、允许的 ASCII/control bytes
-和 TTL `1..86400`。
+默认情况下，上传的槽位被 executor 接受后消费，按第二次不会再输出。使用
+`--keep-after-execute` 可在执行后保留该槽位 committed text；该选项要求 capabilities 的
+`SUPPORTS_KEEP_AFTER_EXECUTE` bit，仍受该槽位 TTL、对应槽位的 `dynamic-clear`、USB
+disconnect、可选 lifecycle clear 和新的上传影响。客户端在任何 HID write 前检查 slot 硬边界
+（`0..7`）、1..512 bytes、允许的 ASCII/control bytes 和 TTL `1..86400`；固件返回的槽位数小于
+请求槽位时也会在 BEGIN 前失败。
 未指定 `--ttl` 时使用固件默认值 300 秒。客户端先读取 capabilities，再以 22-byte payload 分块发送
 `DYNAMIC_BEGIN`/`DYNAMIC_DATA`；BEGIN 和全部 DATA 使用同一 request ID。传输超时、`BAD_REQUEST` 或
 `BAD_OFFSET` 会用新的 request ID 从 BEGIN 重启整个上传；不会自动登录，也不会退回 static `set`。
@@ -150,14 +153,22 @@ clear 和新的上传影响。客户端在任何 HID write 前检查 1..256 byte
 
 ### `dynamic-clear`
 
-清除 dynamic object：
+清除一个槽位，或按 capability 报告的槽位数逐槽清空：
 
 ```sh
-python3 tools/runtime_macro_cli.py dynamic-clear
+python3 tools/runtime_macro_cli.py dynamic-clear --slot 2
+python3 tools/runtime_macro_cli.py dynamic-clear --all
 ```
 
-客户端先探测 capabilities，再发送幂等的 `DYNAMIC_CLEAR`。可恢复传输失败使用新的 request ID
-重试；不影响 static slot、密码或当前认证状态机。
+`--slot` 与 `--all` 必须二选一。客户端总是先探测 capabilities：
+
+- `--slot N`：校验 `N` 在该固件的 `0..dynamic_object_count-1` 内，然后发送幂等的
+  `DYNAMIC_CLEAR`；可恢复传输失败使用新的 request ID 重试。
+- `--all`：对 `0..dynamic_object_count-1` **逐槽**发送 `DYNAMIC_CLEAR`（wire 上没有 clear-all
+  opcode），每个槽位独立重试；某个槽位失败时仍继续尝试其余槽位，然后以非零退出码报告失败
+  槽位——部分成功不会被当成原子清空成功。
+
+两种方式都不影响 static slot、密码或当前认证状态机，也不提供 dynamic text readback。
 
 ### `list`
 
@@ -211,9 +222,10 @@ python3 tools/runtime_macro_cli.py set 2 --file slot-2.txt
 `set` 会先在客户端校验输入，再按协议的 22-byte payload 分块发送。传输超时或事务状态错误
 会以新的 request ID 从 offset `0` 重新开始；设备不会在完整 SET 事务完成前改变 slot。
 
-`dynamic-set` 使用相同的 22-byte 分块大小，但上限固定为 256 bytes。dynamic BEGIN payload
-可以是 `0`、`1`、`4` 或 `5` bytes：`1/5` 的最后一个 flags byte 中 bit 0 为
-`KEEP_AFTER_EXECUTE`；它与 static `set` 完全不是同一个 slot 或持久化路径。
+`dynamic-set` 使用相同的 22-byte 分块大小，但每槽上限为 512 bytes，且目标槽位由 `slot`
+字段指定（不是 static slot）。dynamic BEGIN payload 可以是 `0`、`1`、`4` 或 `5` bytes：
+`1/5` 的最后一个 flags byte 中 bit 0 为 `KEEP_AFTER_EXECUTE`；它与 static `set` 完全不是
+同一个 slot 或持久化路径。
 
 ### `clear SLOT`
 
@@ -233,8 +245,8 @@ python3 tools/runtime_macro_cli.py clear 0
 - Backspace：`0x08`。
 
 不允许 NUL、DEL、UTF-8 多字节字符、中文、Emoji 或其他 Unicode。static slot 最大长度由固件的
-`CONFIG_ZMK_RUNTIME_MACRO_MAX_TEXT_LEN` 决定，默认是 64 bytes；dynamic object 第一版固定为
-1..256 bytes，保存在 RAM 中，不写 Settings/NVS。
+`CONFIG_ZMK_RUNTIME_MACRO_MAX_TEXT_LEN` 决定，默认是 64 bytes；每个 dynamic slot 固定上限为
+1..512 bytes，全部保存在 RAM 中，不写 Settings/NVS。
 
 宏按 US 键盘 usage 执行，而不是发送字符流；主机键盘布局可能影响标点最终产生的字符。
 
@@ -295,8 +307,9 @@ try:
     client.set_slot(0, b"Hello\n")
     client.clear_slot(0)
     capabilities = client.get_capabilities()  # DynamicCapabilities
-    client.upload_dynamic(b"Hello\n", ttl_seconds=600)
-    client.clear_dynamic()
+    client.upload_dynamic(1, b"Hello\n", ttl_seconds=600)
+    client.clear_dynamic(1)
+    client.clear_all_dynamic()      # 逐槽 CLEAR；部分失败会报错
     client.lock()
 finally:
     transport.close()
@@ -325,15 +338,19 @@ RuntimeMacroClient(
 | `get_slot(slot)` | `bytes` | 获取一个 slot 的 ASCII/control bytes |
 | `set_slot(slot, data)` | `None` | 校验并原子替换一个 slot |
 | `clear_slot(slot)` | `None` | 清空并删除一个 slot |
-| `get_capabilities()` | `DynamicCapabilities` | 严格读取 dynamic macro v1 能力；不读取文本 |
-| `upload_dynamic(data, ttl_seconds=None)` | `None` | 校验、分块、原子上传临时 dynamic object |
-| `clear_dynamic()` | `None` | 探测能力后幂等清除 dynamic object |
+| `get_capabilities()` | `DynamicCapabilities` | 严格读取 dynamic macro v2 能力；不读取文本 |
+| `upload_dynamic(slot, data, ttl_seconds=None, *, keep_after_execute=False)` | `None` | 校验、分块、原子上传一个槽位 |
+| `clear_dynamic(slot)` | `None` | 探测能力后幂等清除一个槽位 |
+| `clear_all_dynamic()` | `tuple[int, ...]` | 逐槽 CLEAR；全部成功时返回已清槽位，任何失败抛 `DynamicClearAllError` |
 
-`DynamicCapabilities` 是 frozen dataclass，包含 `capability_version`、`dynamic_object_count`、
-`lifecycle_flags`、`max_dynamic_length`、`default_ttl_seconds`、`min_ttl_seconds`、
-`max_ttl_seconds` 和 `transaction_timeout_seconds`。它还提供 `clear_on_usb_disconnect`、
-`clear_on_ble_profile_change`、`clear_on_selected_endpoint_change` 三个布尔属性。当前 v1
-固定为一个最大 256 bytes 的 RAM-only object；客户端不会增加 `get_dynamic()` API。
+`DynamicCapabilities` 是 frozen dataclass，包含 `capability_version`（必须为 `2`）、
+`dynamic_object_count`（`1..8`）、`lifecycle_flags`、`max_dynamic_length`（`512`）、
+`default_ttl_seconds`、`min_ttl_seconds`、`max_ttl_seconds` 和
+`transaction_timeout_seconds`。它还提供 `clear_on_usb_disconnect`、
+`clear_on_ble_profile_change`、`clear_on_selected_endpoint_change` 和
+`supports_keep_after_execute` 布尔属性。槽位上限为该固件的 `dynamic_object_count`，每槽最大
+512 bytes，全部是 RAM-only；客户端不会增加 `get_dynamic()` API，也不会用 static `list`/`get`
+推断 dynamic 内容。
 
 `AuthInfo` 是 frozen dataclass，包含：
 
@@ -358,7 +375,9 @@ iterations、全零 salt，并在设置密码时拒绝全零派生 key。
 
 输入错误抛出 `ValueError`；设备/传输错误抛出 `DeviceError` 或 `TransportError`；格式错误抛出
 `ProtocolError`；固件返回非零 status 时抛出 `RemoteError`，其 `.status` 保存原始状态码。
-收到 v2 `BAD_VERSION` 时抛出 `LegacyFirmwareError`，不会执行 v1 fallback。
+收到 v2 `BAD_VERSION` 时抛出 `LegacyFirmwareError`，不会执行 v1 fallback。固件仍报告 v1
+dynamic capability（或拒绝 v2 capability slot）时抛出 `DynamicV1Error`；逐槽清空出现失败时抛出
+`DynamicClearAllError`，其 `.failed_slots` 保存失败的槽位。
 
 ### `HidTransport`
 
