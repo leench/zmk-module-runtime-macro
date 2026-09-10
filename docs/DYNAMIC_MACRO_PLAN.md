@@ -1225,9 +1225,19 @@ Phase 8 收尾；`RAM/Flash 最终数据已记录` 一项保持未勾选，13.5 
 
 后续将 dynamic macro 扩展为最多 8 个彼此独立的槽位，每槽最大 512 bytes：
 
-- 每槽独立 text、TTL、执行后消费/保留和 lifecycle 策略；
+- 每槽独立 text、TTL、执行后消费/保留策略（上传级 lifecycle 策略仍暂缓，见 18.1）；
 - 桌面应用可按槽位上传、清除和显示状态；
 - 继续共用单 executor，保持全局互斥，不允许并发执行；
 - 优先使用共享 staging buffer，重新评估 RAM、wire compatibility 和测试矩阵。
+
+多槽位目标设计已在 [`DYNAMIC_MULTISLOT_PLAN.md`](DYNAMIC_MULTISLOT_PLAN.md) 中冻结
+（D0，标注为“设计已确认、尚未实现”）。已确认的关键决策：
+
+- 破坏式升级：直接修改现有 `CAPABILITIES (0x23)`，不保留旧客户端/旧固件兼容；
+- dynamic opcode 的 `slot` 只接受 `0..7`，`0xff` 返回 `BAD_SLOT`；
+- 没有 clear-all opcode 或 sentinel：客户端逐槽发送 `DYNAMIC_CLEAR`；
+- 只保留参数化 `&runtime_macro_dynamic <slot>`，旧零参数绑定需要迁移；
+- 继续无 dynamic readback，且仍为单 active upload、单 executor、全局互斥；
+- 仍只允许非秘密临时文本，安全边界不放宽。
 
 当前实现仍是 1 个槽位、最大 256 bytes；上述扩展需单独设计、实现、验证和提交。
